@@ -2,11 +2,13 @@ package com.example.data.auth
 
 import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
+import androidx.credentials.GetCredentialResponse
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import com.example.R
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
@@ -26,6 +28,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.tasks.await
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 sealed interface AuthOperationState {
     data object Idle : AuthOperationState
@@ -70,13 +78,17 @@ class AuthRepository(
     suspend fun attemptAutoSignIn(context: Context): Result<FirebaseUser> {
         val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
         auth.currentUser?.let { return Result.success(it) }
+        val hostContext = context.findActivity() ?: context
         val clientId = try {
-            context.getString(R.string.default_web_client_id)
+            hostContext.getString(R.string.default_web_client_id).trim()
         } catch (e: Exception) {
             return Result.failure(e)
         }
+        if (clientId.isBlank()) {
+            return Result.failure(IllegalStateException("default_web_client_id is blank"))
+        }
 
-        val credentialManager = CredentialManager.create(context)
+        val credentialManager = CredentialManager.create(hostContext)
         val googleIdOption = GetGoogleIdOption.Builder()
             .setFilterByAuthorizedAccounts(true)
             .setServerClientId(clientId)
@@ -88,7 +100,7 @@ class AuthRepository(
             .build()
 
         return try {
-            val result = credentialManager.getCredential(context, request)
+            val result = credentialManager.getCredential(hostContext, request)
             val credential = result.credential
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
@@ -110,28 +122,57 @@ class AuthRepository(
     suspend fun signInWithGoogleInteractive(activityContext: Context): Result<FirebaseUser> {
         val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
         _authState.value = AuthOperationState.Loading
+        val hostContext = activityContext.findActivity() ?: activityContext
         val clientId = try {
-            activityContext.getString(R.string.default_web_client_id)
+            hostContext.getString(R.string.default_web_client_id).trim()
         } catch (e: Exception) {
             val msg = "Google Sign-In configuration missing: default_web_client_id not found"
             _authState.value = AuthOperationState.Error(msg)
             return Result.failure(IllegalStateException(msg, e))
         }
+        if (clientId.isBlank()) {
+            val msg = "Google Sign-In client ID is empty"
+            _authState.value = AuthOperationState.Error(msg)
+            return Result.failure(IllegalStateException(msg))
+        }
 
         return try {
-            val credentialManager = CredentialManager.create(activityContext)
-            val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
-            val request = GetCredentialRequest.Builder()
-                .addCredentialOption(signInOption)
-                .build()
+            val credentialManager = CredentialManager.create(hostContext)
+            val result: GetCredentialResponse = try {
+                val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
+                val primaryRequest = GetCredentialRequest.Builder()
+                    .addCredentialOption(signInOption)
+                    .build()
+                credentialManager.getCredential(hostContext, primaryRequest)
+            } catch (cancelEx: GetCredentialCancellationException) {
+                throw cancelEx
+            } catch (primaryEx: Exception) {
+                Log.w("Auth", "GetSignInWithGoogleOption failed, falling back to GetGoogleIdOption: ${primaryEx.message}")
+                val fallbackOption = GetGoogleIdOption.Builder()
+                    .setFilterByAuthorizedAccounts(false)
+                    .setServerClientId(clientId)
+                    .setAutoSelectEnabled(false)
+                    .build()
+                val fallbackRequest = GetCredentialRequest.Builder()
+                    .addCredentialOption(fallbackOption)
+                    .build()
+                credentialManager.getCredential(hostContext, fallbackRequest)
+            }
 
-            val result = credentialManager.getCredential(activityContext, request)
             val credential = result.credential
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
-                val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
+                val googleTokenCred = GoogleIdTokenCredential.createFrom(credential.data)
+                val authCredential = GoogleAuthProvider.getCredential(googleTokenCred.idToken, null)
                 val authResult = auth.signInWithCredential(authCredential).await()
                 val user = checkNotNull(authResult.user) { "Authenticated user is null" }
+                if (user.displayName.isNullOrBlank() && !googleTokenCred.displayName.isNullOrBlank()) {
+                    runCatching {
+                        val profileUpdates = com.google.firebase.auth.userProfileChangeRequest {
+                            displayName = googleTokenCred.displayName
+                        }
+                        user.updateProfile(profileUpdates).await()
+                    }
+                }
                 _authState.value = AuthOperationState.Authenticated(user.uid, user.email, user.displayName)
                 Result.success(user)
             } else {

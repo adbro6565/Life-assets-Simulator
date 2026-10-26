@@ -876,6 +876,12 @@ class ExampleRobolectricTest {
         assertTrue(vm.marketTicks.value.isNotEmpty())
         assertTrue(vm.getCandles("crypto_01", com.example.data.model.Timeframe.M15).isNotEmpty())
         assertTrue(vm.getCandles("stk_01", com.example.data.model.Timeframe.M15).isNotEmpty())
+
+        // Ensure failed Google Sign-In never opens a fake account
+        vm.signOut(app)
+        assertFalse(vm.isAuthenticatedSession.value)
+        vm.signInWithGoogle(app)
+        assertFalse("Failed Google Sign-In must never log into a fake account", vm.isAuthenticatedSession.value)
     }
 }
 

@@ -351,55 +351,62 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    private suspend fun provisionOrLoadFirebaseUser(fbUser: com.google.firebase.auth.FirebaseUser): UserEntity {
+        val uid = fbUser.uid
+        var existing = db.userDao().getUserById(uid)
+        if (existing == null) {
+            val remoteProfile = firestoreRepository?.getUserProfile(uid)?.getOrNull()
+            if (remoteProfile != null) {
+                backendQuotaMonitor.recordReads(1)
+            }
+            val baseName = (remoteProfile?.username?.takeIf { it.isNotBlank() }
+                ?: fbUser.displayName
+                ?: fbUser.email?.substringBefore("@")
+                ?: "Trader")
+                .replace(Regex("[^a-zA-Z0-9_]"), "_")
+                .take(15)
+                .ifBlank { "Trader" }
+            val uniqueName = ensureUniqueUsernameCandidate(baseName)
+            val initialCash = remoteProfile?.cashBalance ?: STARTING_CASH_USD
+            val entity = UserEntity(
+                userId = uid,
+                username = uniqueName,
+                normalizedUsername = uniqueName.lowercase(),
+                email = fbUser.email ?: "$uniqueName@lifeassets.io",
+                passwordHash = hashPassword(uid),
+                cashBalance = initialCash,
+                realizedPnL = 0.0,
+                streakDays = remoteProfile?.streakDays?.toInt() ?: 1,
+                lastClaimDateKathmandu = remoteProfile?.lastClaimDateKathmandu
+            )
+            db.userDao().upsertUser(entity)
+            if (remoteProfile == null) {
+                for ((assetId, qty, avgCost) in STARTER_PORTFOLIO_3M_HOLDINGS) {
+                    db.holdingDao().upsertHolding(
+                        HoldingEntity(
+                            userId = uid,
+                            assetId = assetId,
+                            quantity = qty,
+                            averageCostBasis = avgCost,
+                            reservedQuantity = 0.0
+                        )
+                    )
+                }
+            }
+            multiplayerService.seedInitialOffersIfNeeded(uid, uniqueName)
+            existing = entity
+        }
+        _currentUser.value = existing
+        switchActiveUser(uid)
+        syncHoldingsWithFirestore()
+        return existing
+    }
+
     private fun observeFirebaseAuthChanges() {
         viewModelScope.launch {
             authRepository.observeFirebaseUser().collect { fbUser ->
                 if (fbUser != null) {
-                    val uid = fbUser.uid
-                    val existing = db.userDao().getUserById(uid)
-                    if (existing == null) {
-                        val remoteProfile = firestoreRepository?.getUserProfile()?.getOrNull()
-                        if (remoteProfile != null) {
-                            backendQuotaMonitor.recordReads(1)
-                        }
-                        val baseName = (remoteProfile?.username?.takeIf { it.isNotBlank() }
-                            ?: fbUser.displayName
-                            ?: fbUser.email?.substringBefore("@")
-                            ?: "Billionaire")
-                            .replace(Regex("[^a-zA-Z0-9_]"), "_")
-                            .take(15)
-                            .ifBlank { "Trader" }
-                        val uniqueName = ensureUniqueUsernameCandidate(baseName)
-                        val initialCash = remoteProfile?.cashBalance ?: STARTING_CASH_USD
-                        val entity = UserEntity(
-                            userId = uid,
-                            username = uniqueName,
-                            normalizedUsername = uniqueName.lowercase(),
-                            email = fbUser.email ?: "$uniqueName@lifeassets.io",
-                            passwordHash = hashPassword(uid),
-                            cashBalance = initialCash,
-                            realizedPnL = 0.0,
-                            streakDays = remoteProfile?.streakDays?.toInt() ?: 1,
-                            lastClaimDateKathmandu = remoteProfile?.lastClaimDateKathmandu
-                        )
-                        db.userDao().upsertUser(entity)
-                        if (remoteProfile == null) {
-                            for ((assetId, qty, avgCost) in STARTER_PORTFOLIO_3M_HOLDINGS) {
-                                db.holdingDao().upsertHolding(
-                                    HoldingEntity(
-                                        userId = uid,
-                                        assetId = assetId,
-                                        quantity = qty,
-                                        averageCostBasis = avgCost,
-                                        reservedQuantity = 0.0
-                                    )
-                                )
-                            }
-                        }
-                        multiplayerService.seedInitialOffersIfNeeded(uid, uniqueName)
-                    }
-                    switchActiveUser(uid)
-                    syncHoldingsWithFirestore()
+                    provisionOrLoadFirebaseUser(fbUser)
                 }
             }
         }
@@ -833,14 +840,20 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             val res = authRepository.signInWithGoogleInteractive(activityContext)
             res.onSuccess { fbUser ->
-                markAuthenticated(true)
-                postBanner("Signed in with Google as ${fbUser.displayName ?: fbUser.email}")
-                _showAuthModal.value = false
-            }.onFailure { _ ->
-                // In browser streaming emulator without Google Play account configured, sign into verified profile smoothly
+                val userEntity = provisionOrLoadFirebaseUser(fbUser)
                 markAuthenticated(true)
                 _showAuthModal.value = false
-                postBanner("Signed in with Google Virtual Trading Account (@${_currentUser.value?.username ?: "Billionaire_Trader"})")
+                postBanner("Signed in with Google as @${userEntity.username} (${fbUser.email ?: userEntity.email})")
+            }.onFailure { err ->
+                val isCancelled = err is androidx.credentials.exceptions.GetCredentialCancellationException ||
+                    err.message?.contains("cancel", ignoreCase = true) == true
+                if (isCancelled) {
+                    postBanner("Google Sign-In was cancelled. Please select a Google account to continue.")
+                } else {
+                    postBanner(
+                        "Google Sign-In could not complete: ${err.localizedMessage ?: "Ensure a Google account is signed in on this device."}"
+                    )
+                }
             }
         }
     }

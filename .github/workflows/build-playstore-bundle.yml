@@ -41,6 +41,22 @@ jobs:
             echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> $GITHUB_ENV
             echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}" >> $GITHUB_ENV
             echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+          elif [ -f debug.keystore ]; then
+            echo "Creating release keystore with registered Firebase OAuth SHA-1 certificate..."
+            rm -f my-upload-key.jks
+            keytool -importkeystore \
+              -srckeystore debug.keystore \
+              -srcstorepass android \
+              -srckeypass android \
+              -srcalias androiddebugkey \
+              -destkeystore my-upload-key.jks \
+              -deststorepass LifeAssets2026 \
+              -destkeypass LifeAssets2026 \
+              -destalias upload \
+              -noprompt
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> $GITHUB_ENV
+            echo "STORE_PASSWORD=LifeAssets2026" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=LifeAssets2026" >> $GITHUB_ENV
           else
             echo "Generating self-signed upload keystore for build..."
             keytool -genkeypair -v \
@@ -60,8 +76,8 @@ jobs:
       - name: Build Release AAB (for Google Play Console)
         run: ./gradlew :app:bundleRelease --stacktrace
 
-      - name: Build Release APK (for Direct Device Testing)
-        run: ./gradlew :app:assembleRelease --stacktrace
+      - name: Build Release & Debug APKs (for Direct Device Testing)
+        run: ./gradlew :app:assembleRelease :app:assembleDebug --stacktrace
 
       - name: Upload Play Store AAB Bundle
         uses: actions/upload-artifact@v4
