@@ -1,0 +1,284 @@
+{
+  "entities": {
+    "userProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated billionaire player profile and cloud wallet summary.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user."
+        },
+        "username": {
+          "type": "string",
+          "description": "Unique normalized player username."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name shown on leaderboards."
+        },
+        "cashBalance": {
+          "type": "number",
+          "description": "Current virtual liquid cash balance in USD."
+        },
+        "netWorth": {
+          "type": "number",
+          "description": "Total calculated net worth (cash + holdings)."
+        },
+        "streakDays": {
+          "type": "integer",
+          "description": "Consecutive daily reward streak in Asia/Kathmandu timezone."
+        },
+        "lastClaimDateKathmandu": {
+          "type": "string",
+          "description": "Last daily reward claim date in yyyy-MM-dd format (Asia/Kathmandu)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was created via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was last updated via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": ["userId", "username", "cashBalance", "netWorth", "createdAt", "updatedAt"]
+    },
+    "userHolding": {
+      "title": "UserHolding",
+      "description": "A user's owned asset position with quantity, weighted-average cost basis, verified photo metadata, and online price.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "assetId": {
+          "type": "string",
+          "description": "Permanent unique asset ID from the 400-asset catalogue."
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Ticker symbol of the asset."
+        },
+        "name": {
+          "type": "string",
+          "description": "Full display name of the asset."
+        },
+        "category": {
+          "type": "string",
+          "description": "Category identifier of the asset."
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Owned quantity (whole or fractional depending on divisibility)."
+        },
+        "averageCostBasis": {
+          "type": "number",
+          "description": "Weighted-average purchase price per unit in USD."
+        },
+        "imageUrl": {
+          "type": "string",
+          "description": "Verified online HTTPS photograph URL for the asset."
+        },
+        "imageSource": {
+          "type": "string",
+          "description": "Authoritative museum, manufacturer, or editorial CDN source of the photo."
+        },
+        "licenseInfo": {
+          "type": "string",
+          "description": "License terms for the asset photograph."
+        },
+        "verificationStatus": {
+          "type": "string",
+          "enum": ["VERIFIED_REAL_PHOTO", "AWAITING_VERIFICATION", "IMAGE_UNAVAILABLE"],
+          "description": "Verification status of the online asset photograph."
+        },
+        "onlinePriceUsd": {
+          "type": "number",
+          "description": "Latest synchronized online reference valuation in USD."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the holding was created via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the holding was updated via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": ["userId", "assetId", "symbol", "name", "category", "quantity", "averageCostBasis", "createdAt", "updatedAt"]
+    },
+    "syncedAsset": {
+      "title": "SyncedAsset",
+      "description": "Cloud-synchronized asset record storing verified real-world photograph metadata and online market valuation.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "assetId": {
+          "type": "string",
+          "description": "Unique asset ID from the 400-asset catalogue."
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Ticker symbol of the asset."
+        },
+        "name": {
+          "type": "string",
+          "description": "Full display name of the asset."
+        },
+        "category": {
+          "type": "string",
+          "description": "Asset category code."
+        },
+        "imageUrl": {
+          "type": "string",
+          "description": "Primary verified online HTTPS photograph URL."
+        },
+        "thumbnailUrl": {
+          "type": "string",
+          "description": "Optimized online HTTPS thumbnail URL."
+        },
+        "imageSource": {
+          "type": "string",
+          "description": "Authoritative photograph source attribution."
+        },
+        "licenseInfo": {
+          "type": "string",
+          "description": "Photograph license and usage rights."
+        },
+        "verificationStatus": {
+          "type": "string",
+          "enum": ["VERIFIED_REAL_PHOTO", "AWAITING_VERIFICATION", "IMAGE_UNAVAILABLE"],
+          "description": "Verification state of the asset photograph."
+        },
+        "onlinePriceUsd": {
+          "type": "number",
+          "description": "Synchronized real-world online market valuation in USD."
+        },
+        "priceSource": {
+          "type": "string",
+          "description": "Authorized online market data provider source."
+        },
+        "priceType": {
+          "type": "string",
+          "description": "Quote classification (LIVE_QUOTE, DELAYED_QUOTE, OFFICIAL_CLOSE, etc.)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the asset record was created via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the asset record was last updated via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "assetId",
+        "symbol",
+        "name",
+        "category",
+        "imageUrl",
+        "imageSource",
+        "licenseInfo",
+        "verificationStatus",
+        "onlinePriceUsd",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "tradeOrder": {
+      "title": "TradeOrder",
+      "description": "Completed or open trade order record scoped to a user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "assetId": {
+          "type": "string",
+          "description": "Asset identifier."
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Asset ticker symbol."
+        },
+        "side": {
+          "type": "string",
+          "enum": ["BUY", "SELL"],
+          "description": "Order side (BUY or SELL)."
+        },
+        "orderType": {
+          "type": "string",
+          "enum": ["MARKET", "LIMIT"],
+          "description": "Execution type (MARKET or LIMIT)."
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Executed or requested quantity."
+        },
+        "executionPrice": {
+          "type": "number",
+          "description": "Unit execution or limit price in USD."
+        },
+        "fee": {
+          "type": "number",
+          "description": "Brokerage fee in USD."
+        },
+        "totalAmount": {
+          "type": "number",
+          "description": "Total buy cost or net sell proceeds in USD."
+        },
+        "realizedPnL": {
+          "type": "number",
+          "description": "Realized profit or loss on SELL orders."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["FILLED", "OPEN", "CANCELLED"],
+          "description": "Current order lifecycle status."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": ["userId", "assetId", "symbol", "side", "orderType", "quantity", "executionPrice", "fee", "totalAmount", "status", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/userProfile" },
+      "description": "Stores each authenticated user's profile, liquid cash balance, net worth, and daily claim state."
+    },
+    "/users/{userId}/holdings/{assetId}": {
+      "schema": { "$ref": "#/entities/userHolding" },
+      "description": "Stores each authenticated user's asset holdings keyed by assetId, including verified image metadata and online valuation."
+    },
+    "/users/{userId}/assets/{assetId}": {
+      "schema": { "$ref": "#/entities/syncedAsset" },
+      "description": "Stores cloud-synchronized asset records with imageUrl, imageSource, licenseInfo, verificationStatus, onlinePriceUsd, and updatedAt."
+    },
+    "/users/{userId}/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/tradeOrder" },
+      "description": "Stores each authenticated user's executed and open trade orders."
+    }
+  }
+}

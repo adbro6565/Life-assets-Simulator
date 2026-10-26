@@ -1,0 +1,6 @@
+{
+  "name": "LifeAssets",
+  "description": "Futuristic global wealth simulator and virtual asset trading terminal with 400+ assets, real-time markets, multiplayer trading, and AI market insights.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

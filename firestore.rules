@@ -1,0 +1,198 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: default-deny all paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidVerificationStatus(status) {
+      return status is string && (
+        status == 'VERIFIED_REAL_PHOTO' ||
+        status == 'AWAITING_VERIFICATION' ||
+        status == 'IMAGE_UNAVAILABLE'
+      );
+    }
+
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.username is string && data.username.size() >= 2 && data.username.size() <= 40 &&
+             (!('displayName' in data) || data.displayName == null || (data.displayName is string && data.displayName.size() <= 80)) &&
+             (data.cashBalance is int || data.cashBalance is float) && data.cashBalance >= 0 &&
+             (data.netWorth is int || data.netWorth is float) && data.netWorth >= 0 &&
+             (!('streakDays' in data) || (data.streakDays is int && data.streakDays >= 0 && data.streakDays <= 10000)) &&
+             (!('lastClaimDateKathmandu' in data) || data.lastClaimDateKathmandu == null || (data.lastClaimDateKathmandu is string && data.lastClaimDateKathmandu.size() <= 16)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidHolding(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.assetId is string && data.assetId.size() >= 1 && data.assetId.size() <= 64 &&
+             data.symbol is string && data.symbol.size() >= 1 && data.symbol.size() <= 20 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 60 &&
+             (data.quantity is int || data.quantity is float) && data.quantity > 0 &&
+             (data.averageCostBasis is int || data.averageCostBasis is float) && data.averageCostBasis >= 0 &&
+             (!('imageUrl' in data) || data.imageUrl == null || (data.imageUrl is string && data.imageUrl.size() <= 600)) &&
+             (!('imageSource' in data) || data.imageSource == null || (data.imageSource is string && data.imageSource.size() <= 200)) &&
+             (!('licenseInfo' in data) || data.licenseInfo == null || (data.licenseInfo is string && data.licenseInfo.size() <= 200)) &&
+             (!('verificationStatus' in data) || data.verificationStatus == null || isValidVerificationStatus(data.verificationStatus)) &&
+             (!('onlinePriceUsd' in data) || data.onlinePriceUsd == null || ((data.onlinePriceUsd is int || data.onlinePriceUsd is float) && data.onlinePriceUsd >= 0)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidSyncedAsset(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.assetId is string && data.assetId.size() >= 1 && data.assetId.size() <= 64 &&
+             data.symbol is string && data.symbol.size() >= 1 && data.symbol.size() <= 20 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 60 &&
+             data.imageUrl is string && data.imageUrl.size() <= 600 &&
+             (!('thumbnailUrl' in data) || data.thumbnailUrl == null || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 600)) &&
+             data.imageSource is string && data.imageSource.size() >= 1 && data.imageSource.size() <= 200 &&
+             data.licenseInfo is string && data.licenseInfo.size() >= 1 && data.licenseInfo.size() <= 200 &&
+             isValidVerificationStatus(data.verificationStatus) &&
+             (data.onlinePriceUsd is int || data.onlinePriceUsd is float) && data.onlinePriceUsd >= 0 &&
+             (!('priceSource' in data) || data.priceSource == null || (data.priceSource is string && data.priceSource.size() <= 200)) &&
+             (!('priceType' in data) || data.priceType == null || (data.priceType is string && data.priceType.size() <= 60)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidTradeOrder(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.assetId is string && data.assetId.size() >= 1 && data.assetId.size() <= 64 &&
+             data.symbol is string && data.symbol.size() >= 1 && data.symbol.size() <= 20 &&
+             data.side is string && (data.side == 'BUY' || data.side == 'SELL') &&
+             data.orderType is string && (data.orderType == 'MARKET' || data.orderType == 'LIMIT') &&
+             (data.quantity is int || data.quantity is float) && data.quantity > 0 &&
+             (data.executionPrice is int || data.executionPrice is float) && data.executionPrice > 0 &&
+             (data.fee is int || data.fee is float) && data.fee >= 0 &&
+             (data.totalAmount is int || data.totalAmount is float) && data.totalAmount >= 0 &&
+             (!('realizedPnL' in data) || data.realizedPnL == null || data.realizedPnL is int || data.realizedPnL is float) &&
+             data.status is string && (data.status == 'FILLED' || data.status == 'OPEN' || data.status == 'CANCELLED') &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().keys().hasAll(['userId', 'username', 'cashBalance', 'netWorth', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'cashBalance', 'netWorth', 'streakDays', 'lastClaimDateKathmandu', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'cashBalance', 'netWorth', 'streakDays', 'lastClaimDateKathmandu', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+      match /holdings/{assetId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(assetId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(assetId) &&
+                         request.auth.uid == userId &&
+                         incoming().assetId == assetId &&
+                         incoming().keys().hasAll(['userId', 'assetId', 'symbol', 'name', 'category', 'quantity', 'averageCostBasis', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'assetId', 'symbol', 'name', 'category', 'quantity', 'averageCostBasis', 'imageUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'createdAt', 'updatedAt']) &&
+                         isValidHolding(incoming());
+
+        allow update: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(assetId) &&
+                         request.auth.uid == userId &&
+                         isValidHolding(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().assetId == existing().assetId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['symbol', 'name', 'category', 'quantity', 'averageCostBasis', 'imageUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(assetId) && request.auth.uid == userId;
+      }
+
+      match /assets/{assetId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(assetId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(assetId) &&
+                         request.auth.uid == userId &&
+                         incoming().assetId == assetId &&
+                         incoming().keys().hasAll(['userId', 'assetId', 'symbol', 'name', 'category', 'imageUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'assetId', 'symbol', 'name', 'category', 'imageUrl', 'thumbnailUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'priceSource', 'priceType', 'createdAt', 'updatedAt']) &&
+                         isValidSyncedAsset(incoming());
+
+        allow update: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(assetId) &&
+                         request.auth.uid == userId &&
+                         isValidSyncedAsset(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().assetId == existing().assetId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['symbol', 'name', 'category', 'imageUrl', 'thumbnailUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'priceSource', 'priceType', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(assetId) && request.auth.uid == userId;
+      }
+
+      match /orders/{orderId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(orderId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(orderId) &&
+                         request.auth.uid == userId &&
+                         incoming().keys().hasAll(['userId', 'assetId', 'symbol', 'side', 'orderType', 'quantity', 'executionPrice', 'fee', 'totalAmount', 'status', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'assetId', 'symbol', 'side', 'orderType', 'quantity', 'executionPrice', 'fee', 'totalAmount', 'realizedPnL', 'status', 'createdAt', 'updatedAt']) &&
+                         isValidTradeOrder(incoming());
+
+        allow update: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(orderId) &&
+                         request.auth.uid == userId &&
+                         isValidTradeOrder(incoming()) &&
+                         existing().status == 'OPEN' &&
+                         incoming().userId == existing().userId &&
+                         incoming().assetId == existing().assetId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(orderId) && request.auth.uid == userId;
+      }
+    }
+  }
+}
