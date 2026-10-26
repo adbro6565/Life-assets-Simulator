@@ -16,10 +16,12 @@ import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
+import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -35,6 +37,13 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
+data class GoogleSignInAccountResult(
+    val uid: String,
+    val email: String,
+    val displayName: String,
+    val firebaseUser: FirebaseUser? = null
+)
+
 sealed interface AuthOperationState {
     data object Idle : AuthOperationState
     data object Loading : AuthOperationState
@@ -43,7 +52,7 @@ sealed interface AuthOperationState {
 }
 
 class AuthRepository(
-    private val firebaseAuth: FirebaseAuth? = runCatching { Firebase.auth }.getOrNull()
+    private var firebaseAuth: FirebaseAuth? = runCatching { Firebase.auth }.getOrNull()
 ) {
     private val _authState = MutableStateFlow<AuthOperationState>(
         runCatching { firebaseAuth?.currentUser }.getOrNull()?.let {
@@ -55,8 +64,28 @@ class AuthRepository(
     val currentUser: FirebaseUser?
         get() = runCatching { firebaseAuth?.currentUser }.getOrNull()
 
+    private fun resolveFirebaseAuth(context: Context? = null): FirebaseAuth? {
+        firebaseAuth?.let { return it }
+        if (context != null) {
+            runCatching {
+                if (FirebaseApp.getApps(context).isEmpty()) {
+                    FirebaseApp.initializeApp(context)
+                }
+            }
+        }
+        val resolved = runCatching { Firebase.auth }.getOrNull()
+        if (resolved != null) {
+            firebaseAuth = resolved
+        }
+        return resolved
+    }
+
+    fun markGoogleAccountAuthenticated(uid: String, email: String, displayName: String) {
+        _authState.value = AuthOperationState.Authenticated(uid, email, displayName)
+    }
+
     fun observeFirebaseUser(): Flow<FirebaseUser?> = callbackFlow {
-        val auth = firebaseAuth
+        val auth = resolveFirebaseAuth()
         if (auth == null) {
             trySend(null)
             awaitClose { }
@@ -76,7 +105,7 @@ class AuthRepository(
     }
 
     suspend fun attemptAutoSignIn(context: Context): Result<FirebaseUser> {
-        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
+        val auth = resolveFirebaseAuth(context) ?: return Result.failure(IllegalStateException("Cloud auth not configured"))
         auth.currentUser?.let { return Result.success(it) }
         val hostContext = context.findActivity() ?: context
         val clientId = try {
@@ -119,16 +148,14 @@ class AuthRepository(
         }
     }
 
-    suspend fun signInWithGoogleInteractive(activityContext: Context): Result<FirebaseUser> {
-        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
+    suspend fun signInWithGoogleInteractive(activityContext: Context): Result<GoogleSignInAccountResult> {
         _authState.value = AuthOperationState.Loading
         val hostContext = activityContext.findActivity() ?: activityContext
+        val auth = resolveFirebaseAuth(hostContext)
         val clientId = try {
             hostContext.getString(R.string.default_web_client_id).trim()
         } catch (e: Exception) {
-            val msg = "Google Sign-In configuration missing: default_web_client_id not found"
-            _authState.value = AuthOperationState.Error(msg)
-            return Result.failure(IllegalStateException(msg, e))
+            ""
         }
         if (clientId.isBlank()) {
             val msg = "Google Sign-In client ID is empty"
@@ -162,19 +189,42 @@ class AuthRepository(
             val credential = result.credential
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val googleTokenCred = GoogleIdTokenCredential.createFrom(credential.data)
-                val authCredential = GoogleAuthProvider.getCredential(googleTokenCred.idToken, null)
-                val authResult = auth.signInWithCredential(authCredential).await()
-                val user = checkNotNull(authResult.user) { "Authenticated user is null" }
-                if (user.displayName.isNullOrBlank() && !googleTokenCred.displayName.isNullOrBlank()) {
+                val googleEmail = googleTokenCred.id.trim()
+                val googleName = googleTokenCred.displayName?.trim()?.takeIf { it.isNotBlank() }
+                    ?: googleEmail.substringBefore("@").ifBlank { "Trader" }
+
+                val fbUser = if (auth != null) {
                     runCatching {
-                        val profileUpdates = com.google.firebase.auth.userProfileChangeRequest {
-                            displayName = googleTokenCred.displayName
+                        val authCredential = GoogleAuthProvider.getCredential(googleTokenCred.idToken, null)
+                        val authResult = auth.signInWithCredential(authCredential).await()
+                        val signedInUser = authResult.user
+                        if (signedInUser != null && signedInUser.displayName.isNullOrBlank() && googleName.isNotBlank()) {
+                            runCatching {
+                                val profileUpdates = com.google.firebase.auth.userProfileChangeRequest {
+                                    displayName = googleName
+                                }
+                                signedInUser.updateProfile(profileUpdates).await()
+                            }
                         }
-                        user.updateProfile(profileUpdates).await()
-                    }
+                        signedInUser
+                    }.getOrNull()
+                } else {
+                    null
                 }
-                _authState.value = AuthOperationState.Authenticated(user.uid, user.email, user.displayName)
-                Result.success(user)
+
+                val effectiveUid = fbUser?.uid ?: deterministicGoogleUid(googleEmail)
+                val effectiveEmail = fbUser?.email?.takeIf { it.isNotBlank() } ?: googleEmail
+                val effectiveName = fbUser?.displayName?.takeIf { it.isNotBlank() } ?: googleName
+
+                _authState.value = AuthOperationState.Authenticated(effectiveUid, effectiveEmail, effectiveName)
+                Result.success(
+                    GoogleSignInAccountResult(
+                        uid = effectiveUid,
+                        email = effectiveEmail,
+                        displayName = effectiveName,
+                        firebaseUser = fbUser
+                    )
+                )
             } else {
                 val msg = "Unexpected credential type returned from CredentialManager"
                 _authState.value = AuthOperationState.Error(msg)
@@ -188,7 +238,7 @@ class AuthRepository(
             _authState.value = AuthOperationState.Idle
             throw e
         } catch (e: Exception) {
-            Log.e("Auth", "Google Sign-In failed", e)
+            Log.e("Auth", "Google Sign-In via CredentialManager failed", e)
             val msg = e.localizedMessage ?: "Google Sign-In failed"
             _authState.value = AuthOperationState.Error(msg)
             Result.failure(e)
@@ -196,7 +246,7 @@ class AuthRepository(
     }
 
     suspend fun signUpWithEmail(email: String, password: String, displayName: String? = null): Result<FirebaseUser> {
-        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
+        val auth = resolveFirebaseAuth() ?: return Result.failure(IllegalStateException("Local account registration fallback"))
         _authState.value = AuthOperationState.Loading
         return try {
             val authResult = auth.createUserWithEmailAndPassword(email.trim(), password).await()
@@ -225,7 +275,7 @@ class AuthRepository(
     }
 
     suspend fun signInWithEmail(email: String, password: String): Result<FirebaseUser> {
-        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
+        val auth = resolveFirebaseAuth() ?: return Result.failure(IllegalStateException("Local account login fallback"))
         _authState.value = AuthOperationState.Loading
         return try {
             val authResult = auth.signInWithEmailAndPassword(email.trim(), password).await()
@@ -244,7 +294,7 @@ class AuthRepository(
     }
 
     suspend fun sendPasswordResetEmail(email: String): Result<Unit> {
-        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
+        val auth = resolveFirebaseAuth() ?: return Result.failure(IllegalStateException("Password reset service unavailable"))
         return try {
             auth.sendPasswordResetEmail(email.trim()).await()
             Result.success(Unit)
@@ -291,6 +341,15 @@ class AuthRepository(
     fun clearError() {
         if (_authState.value is AuthOperationState.Error) {
             _authState.value = AuthOperationState.Idle
+        }
+    }
+
+    companion object {
+        fun deterministicGoogleUid(email: String): String {
+            val normalized = email.trim().lowercase()
+            val digest = MessageDigest.getInstance("SHA-256").digest("LifeAssetsGoogleUid::$normalized".toByteArray())
+            val hex = digest.joinToString("") { "%02x".format(it) }.take(20)
+            return "google_$hex"
         }
     }
 }

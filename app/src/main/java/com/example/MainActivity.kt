@@ -1,10 +1,14 @@
 package com.example
 
+import android.accounts.AccountManager
+import android.app.Activity
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -13,16 +17,25 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +58,7 @@ import com.example.ui.components.DarkCardBg
 import com.example.ui.components.DarkNavyBg
 import com.example.ui.components.EmeraldAccent
 import com.example.ui.components.QuantitySelectorModal
+import com.example.ui.components.SubtleCardBorder
 import com.example.ui.screens.AuthModalSheet
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.LifeBotScreen
@@ -56,7 +70,10 @@ import com.example.ui.screens.PortfolioScreen
 import com.example.ui.screens.ProfileScreen
 import com.example.ui.screens.RewardsScreen
 import com.example.ui.theme.LifeAssetsTheme
+import com.example.ui.theme.ObsidianBlack
+import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
 import com.example.ui.viewmodel.LifeAssetsViewModel
 
 class MainActivity : ComponentActivity() {
@@ -109,6 +126,8 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
     val isSubmittingOrder by viewModel.isSubmittingOrder.collectAsStateWithLifecycle()
     val detailSheetAsset by viewModel.detailSheetAsset.collectAsStateWithLifecycle()
     val showAuthModal by viewModel.showAuthModal.collectAsStateWithLifecycle()
+    val requestSystemGoogleAccountPicker by viewModel.requestSystemGoogleAccountPicker.collectAsStateWithLifecycle()
+    val showGoogleEmailFallbackDialog by viewModel.showGoogleEmailFallbackDialog.collectAsStateWithLifecycle()
 
     val lifeBotMessages by viewModel.lifeBotMessages.collectAsStateWithLifecycle()
     val isLifeBotThinking by viewModel.isLifeBotThinking.collectAsStateWithLifecycle()
@@ -116,6 +135,119 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
     val watchedAssetIds by viewModel.watchedAssetIds.collectAsStateWithLifecycle()
     val imageAuditReport by viewModel.imageAuditReport.collectAsStateWithLifecycle()
     val quotaSnapshot by viewModel.quotaSnapshot.collectAsStateWithLifecycle()
+
+    val googleAccountChooserLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val selectedEmail = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+            if (!selectedEmail.isNullOrBlank()) {
+                currentDestination = AppDestination.DASHBOARD
+                viewModel.completeSystemGoogleAccountSelection(selectedEmail)
+            } else {
+                viewModel.setShowGoogleEmailFallbackDialog(true)
+            }
+        } else {
+            viewModel.setShowGoogleEmailFallbackDialog(true)
+        }
+    }
+
+    LaunchedEffect(requestSystemGoogleAccountPicker) {
+        if (requestSystemGoogleAccountPicker) {
+            viewModel.consumeSystemGoogleAccountPickerRequest()
+            try {
+                @Suppress("DEPRECATION")
+                val intent = AccountManager.newChooseAccountIntent(
+                    null,
+                    null,
+                    arrayOf("com.google"),
+                    false,
+                    null,
+                    null,
+                    null,
+                    null
+                )
+                googleAccountChooserLauncher.launch(intent)
+            } catch (_: Exception) {
+                viewModel.setShowGoogleEmailFallbackDialog(true)
+            }
+        }
+    }
+
+    if (showGoogleEmailFallbackDialog) {
+        var googleEmailInput by rememberSaveable { mutableStateOf("") }
+        var googleNameInput by rememberSaveable { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { viewModel.setShowGoogleEmailFallbackDialog(false) },
+            containerColor = DarkCardBg,
+            title = {
+                Text(
+                    text = "Sign in with Google",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.ExtraBold
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        text = "Enter your Google Account (@gmail.com) to sign in or create your LifeAssets portfolio ($4,000,000 starting virtual cash for new accounts):",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = googleNameInput,
+                        onValueChange = { googleNameInput = it },
+                        placeholder = { Text("Your Name (optional)", color = TextMuted) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = EmeraldAccent,
+                            unfocusedBorderColor = SubtleCardBorder,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = googleEmailInput,
+                        onValueChange = { googleEmailInput = it },
+                        placeholder = { Text("yourname@gmail.com", color = TextMuted) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = EmeraldAccent,
+                            unfocusedBorderColor = SubtleCardBorder,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        currentDestination = AppDestination.DASHBOARD
+                        viewModel.completeSystemGoogleAccountSelection(
+                            email = googleEmailInput,
+                            displayName = googleNameInput
+                        )
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = EmeraldAccent,
+                        contentColor = ObsidianBlack
+                    )
+                ) {
+                    Text("Continue with Google", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.setShowGoogleEmailFallbackDialog(false) }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            }
+        )
+    }
 
     // Online-Only Gate: If internet or backend is unavailable, show full-screen "Internet Connection Required" page
     if (connectionStatus == com.example.data.model.ConnectionStatus.OFFLINE) {

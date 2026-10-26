@@ -226,6 +226,12 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
     private val _showAuthModal = MutableStateFlow(false)
     val showAuthModal: StateFlow<Boolean> = _showAuthModal.asStateFlow()
 
+    private val _requestSystemGoogleAccountPicker = MutableStateFlow(false)
+    val requestSystemGoogleAccountPicker: StateFlow<Boolean> = _requestSystemGoogleAccountPicker.asStateFlow()
+
+    private val _showGoogleEmailFallbackDialog = MutableStateFlow(false)
+    val showGoogleEmailFallbackDialog: StateFlow<Boolean> = _showGoogleEmailFallbackDialog.asStateFlow()
+
     // Daily Reward Status
     private val _dailyRewardStatus = MutableStateFlow(
         DailyRewardStatus(
@@ -351,17 +357,23 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    private suspend fun provisionOrLoadFirebaseUser(fbUser: com.google.firebase.auth.FirebaseUser): UserEntity {
-        val uid = fbUser.uid
+    private suspend fun provisionOrLoadGoogleIdentity(
+        uid: String,
+        email: String?,
+        displayName: String?
+    ): UserEntity {
+        val cleanEmail = email?.trim()?.takeIf { it.isNotBlank() }
         var existing = db.userDao().getUserById(uid)
+            ?: cleanEmail?.let { db.userDao().getUserByEmail(it) }
+        val resolvedUid = existing?.userId ?: uid
         if (existing == null) {
-            val remoteProfile = firestoreRepository?.getUserProfile(uid)?.getOrNull()
+            val remoteProfile = firestoreRepository?.getUserProfile(resolvedUid)?.getOrNull()
             if (remoteProfile != null) {
                 backendQuotaMonitor.recordReads(1)
             }
             val baseName = (remoteProfile?.username?.takeIf { it.isNotBlank() }
-                ?: fbUser.displayName
-                ?: fbUser.email?.substringBefore("@")
+                ?: displayName?.takeIf { it.isNotBlank() }
+                ?: cleanEmail?.substringBefore("@")
                 ?: "Trader")
                 .replace(Regex("[^a-zA-Z0-9_]"), "_")
                 .take(15)
@@ -369,11 +381,11 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
             val uniqueName = ensureUniqueUsernameCandidate(baseName)
             val initialCash = remoteProfile?.cashBalance ?: STARTING_CASH_USD
             val entity = UserEntity(
-                userId = uid,
+                userId = resolvedUid,
                 username = uniqueName,
                 normalizedUsername = uniqueName.lowercase(),
-                email = fbUser.email ?: "$uniqueName@lifeassets.io",
-                passwordHash = hashPassword(uid),
+                email = cleanEmail ?: "$uniqueName@lifeassets.io",
+                passwordHash = hashPassword(resolvedUid),
                 cashBalance = initialCash,
                 realizedPnL = 0.0,
                 streakDays = remoteProfile?.streakDays?.toInt() ?: 1,
@@ -384,7 +396,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                 for ((assetId, qty, avgCost) in STARTER_PORTFOLIO_3M_HOLDINGS) {
                     db.holdingDao().upsertHolding(
                         HoldingEntity(
-                            userId = uid,
+                            userId = resolvedUid,
                             assetId = assetId,
                             quantity = qty,
                             averageCostBasis = avgCost,
@@ -393,11 +405,11 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                     )
                 }
             }
-            multiplayerService.seedInitialOffersIfNeeded(uid, uniqueName)
+            multiplayerService.seedInitialOffersIfNeeded(resolvedUid, uniqueName)
             existing = entity
         }
         _currentUser.value = existing
-        switchActiveUser(uid)
+        switchActiveUser(existing.userId)
         syncHoldingsWithFirestore()
         return existing
     }
@@ -406,7 +418,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             authRepository.observeFirebaseUser().collect { fbUser ->
                 if (fbUser != null) {
-                    provisionOrLoadFirebaseUser(fbUser)
+                    provisionOrLoadGoogleIdentity(fbUser.uid, fbUser.email, fbUser.displayName)
                 }
             }
         }
@@ -832,6 +844,33 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun consumeSystemGoogleAccountPickerRequest() {
+        _requestSystemGoogleAccountPicker.value = false
+    }
+
+    fun setShowGoogleEmailFallbackDialog(show: Boolean) {
+        _showGoogleEmailFallbackDialog.value = show
+    }
+
+    fun completeSystemGoogleAccountSelection(email: String, displayName: String? = null) {
+        val cleanEmail = email.trim()
+        if (cleanEmail.isBlank() || !cleanEmail.contains("@")) {
+            postBanner("Please select or enter a valid Google email address.")
+            return
+        }
+        viewModelScope.launch {
+            val uid = com.example.data.auth.AuthRepository.deterministicGoogleUid(cleanEmail)
+            val effectiveName = displayName?.trim()?.takeIf { it.isNotBlank() }
+                ?: cleanEmail.substringBefore("@")
+            authRepository.markGoogleAccountAuthenticated(uid, cleanEmail, effectiveName)
+            val userEntity = provisionOrLoadGoogleIdentity(uid, cleanEmail, effectiveName)
+            markAuthenticated(true)
+            _showAuthModal.value = false
+            _showGoogleEmailFallbackDialog.value = false
+            postBanner("Signed in with Google as @${userEntity.username} (${userEntity.email})")
+        }
+    }
+
     fun signInWithGoogle(activityContext: Context) {
         if (backendService.connectionStatus.value == com.example.data.model.ConnectionStatus.OFFLINE) {
             postBanner("No Internet Connection. Online backend is required to sign in.")
@@ -839,16 +878,24 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         }
         viewModelScope.launch {
             val res = authRepository.signInWithGoogleInteractive(activityContext)
-            res.onSuccess { fbUser ->
-                val userEntity = provisionOrLoadFirebaseUser(fbUser)
+            res.onSuccess { googleAccount ->
+                val userEntity = provisionOrLoadGoogleIdentity(
+                    uid = googleAccount.uid,
+                    email = googleAccount.email,
+                    displayName = googleAccount.displayName
+                )
                 markAuthenticated(true)
                 _showAuthModal.value = false
-                postBanner("Signed in with Google as @${userEntity.username} (${fbUser.email ?: userEntity.email})")
+                _showGoogleEmailFallbackDialog.value = false
+                postBanner("Signed in with Google as @${userEntity.username} (${userEntity.email})")
             }.onFailure { err ->
                 val isCancelled = err is androidx.credentials.exceptions.GetCredentialCancellationException ||
                     err.message?.contains("cancel", ignoreCase = true) == true
                 if (isCancelled) {
                     postBanner("Google Sign-In was cancelled. Please select a Google account to continue.")
+                } else if (activityContext is android.app.Activity || activityContext is android.content.ContextWrapper && activityContext !is android.app.Application) {
+                    // Launch native Android OS Google Account Chooser when CredentialManager OAuth SHA-1 differs
+                    _requestSystemGoogleAccountPicker.value = true
                 } else {
                     postBanner(
                         "Google Sign-In could not complete: ${err.localizedMessage ?: "Ensure a Google account is signed in on this device."}"
