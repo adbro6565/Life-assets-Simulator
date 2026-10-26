@@ -1,0 +1,78 @@
+name: Build Play Store AAB & APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute permission for gradlew
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper
+          fi
+          chmod +x gradlew
+
+      - name: Prepare Keystores
+        id: prepare_keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            base64 --decode debug.keystore.base64 > debug.keystore
+          fi
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "Decoding release keystore from GitHub Secrets..."
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > my-upload-key.jks
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> $GITHUB_ENV
+            echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "Generating self-signed upload keystore for build..."
+            keytool -genkeypair -v \
+              -keystore my-upload-key.jks \
+              -alias upload \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass LifeAssets2026 \
+              -keypass LifeAssets2026 \
+              -dname "CN=LifeAssets, OU=Mobile, O=LifeAssets, L=Kathmandu, ST=Bagmati, C=NP"
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> $GITHUB_ENV
+            echo "STORE_PASSWORD=LifeAssets2026" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=LifeAssets2026" >> $GITHUB_ENV
+          fi
+
+      - name: Build Release AAB (for Google Play Console)
+        run: ./gradlew :app:bundleRelease --stacktrace
+
+      - name: Build Release APK (for Direct Device Testing)
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      - name: Upload Play Store AAB Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlayStore-Release-AAB
+          path: app/build/outputs/bundle/release/*.aab
+          retention-days: 14
+
+      - name: Upload Testable Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Testable-Release-APK
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 14

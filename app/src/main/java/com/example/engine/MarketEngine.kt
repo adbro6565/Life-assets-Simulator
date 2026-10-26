@@ -97,7 +97,9 @@ class MarketEngine(
             )
             val freshness = backendService.evaluateQuoteFreshness(asset, prelimTick, nowMillis)
             initialMap[asset.id] = prelimTick.copy(freshnessStatus = freshness)
-            seedInitialCandles(asset, current, nowMillis)
+            if (asset.id == "crypto_01") {
+                seedInitialCandles(asset, current, nowMillis)
+            }
         }
         _ticks.value = initialMap
     }
@@ -227,7 +229,9 @@ class MarketEngine(
             )
             val freshness = backendService.evaluateQuoteFreshness(asset, prelimTick, nowMillis)
             currentMap[asset.id] = prelimTick.copy(freshnessStatus = freshness)
-            appendTickToCandles(asset.id, nextPrice, refAnchor * 0.4, nowMillis)
+            if (candleHistory.containsKey(asset.id)) {
+                appendTickToCandles(asset.id, nextPrice, refAnchor * 0.4, nowMillis)
+            }
         }
 
         _ticks.value = currentMap
@@ -316,8 +320,17 @@ class MarketEngine(
     }
 
     fun getCandles(assetId: String, timeframe: Timeframe): List<Candle> {
-        val baseCandles = candleHistory[assetId] ?: emptyList()
-        if (baseCandles.isEmpty()) return emptyList()
+        var baseCandles = candleHistory[assetId]
+        if (baseCandles.isNullOrEmpty()) {
+            val asset = AssetCatalogue.getAssetById(assetId)
+            if (asset != null) {
+                val latestPrice = _ticks.value[assetId]?.currentPrice ?: asset.basePrice
+                seedInitialCandles(asset, latestPrice, System.currentTimeMillis())
+                baseCandles = candleHistory[assetId]
+            }
+        }
+        val resolvedCandles = baseCandles ?: emptyList()
+        if (resolvedCandles.isEmpty()) return emptyList()
         val factor = when (timeframe) {
             Timeframe.M1 -> 1
             Timeframe.M5 -> 2
@@ -328,8 +341,8 @@ class MarketEngine(
             Timeframe.W1 -> 7
             Timeframe.MO1 -> 8
         }
-        if (factor == 1 || baseCandles.size < factor * 4) return baseCandles.takeLast(32)
-        return baseCandles.chunked(factor).map { chunk ->
+        if (factor == 1 || resolvedCandles.size < factor * 4) return resolvedCandles.takeLast(32)
+        return resolvedCandles.chunked(factor).map { chunk ->
             Candle(
                 timestampMillis = chunk.last().timestampMillis,
                 open = chunk.first().open,

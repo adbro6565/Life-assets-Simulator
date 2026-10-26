@@ -39,6 +39,8 @@ import com.example.engine.LifeBotService
 import com.example.engine.MarketEngine
 import com.example.engine.MultiplayerService
 import com.example.engine.TradingService
+import com.google.firebase.FirebaseApp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +51,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
@@ -75,6 +78,14 @@ data class PortfolioMetrics(
 
 class LifeAssetsViewModel(application: Application) : AndroidViewModel(application) {
 
+    init {
+        runCatching {
+            if (FirebaseApp.getApps(application).isEmpty()) {
+                FirebaseApp.initializeApp(application)
+            }
+        }
+    }
+
     private val db = LifeAssetsDatabase.getInstance(application)
     val marketEngine = MarketEngine()
     val backendService = marketEngine.backendService
@@ -87,7 +98,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
     val backendQuotaMonitor = BackendQuotaMonitor()
     private val firestoreRepository: FirestoreHoldingRepository? = try {
         FirestoreHoldingRepository(application)
-    } catch (_: Exception) {
+    } catch (_: Throwable) {
         null
     }
 
@@ -254,40 +265,53 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
     private var userStreamsJob: Job? = null
 
     init {
-        viewModelScope.launch {
-            val entities = AssetCatalogue.allAssets.map { com.example.data.local.AssetEntity.fromAsset(it) }
-            db.assetDao().insertAll(entities)
-            _imageAuditReport.value = imageAuditService.auditAndRepairAllAssets(
-                liveTicks = marketEngine.ticks.value,
-                firestoreRepository = if (authRepository.currentUser != null) firestoreRepository else null
-            )
-            val dbWatched = db.assetDao().getWatchedAssetIds()
-            if (dbWatched.isNotEmpty()) {
-                _watchedAssetIds.value = dbWatched.toSet()
-            }
-            startMarketSimulationLoop()
-            startDailyRewardCountdownLoop()
-            observeFirebaseAuthChanges()
+        startMarketSimulationLoop()
+        startDailyRewardCountdownLoop()
+        observeFirebaseAuthChanges()
 
-            val activeUid = _currentUserId.value
-            val isAuth = _isAuthenticatedSession.value
-            if (isAuth && activeUid.isNotBlank()) {
-                observeUserStreams(activeUid)
-                refreshDailyRewardStatus()
+        val activeUid = _currentUserId.value
+        val isAuth = _isAuthenticatedSession.value
+        if (isAuth && activeUid.isNotBlank()) {
+            observeUserStreams(activeUid)
+            viewModelScope.launch {
+                runCatching { refreshDailyRewardStatus() }
+            }
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val entities = AssetCatalogue.allAssets.map { com.example.data.local.AssetEntity.fromAsset(it) }
+                db.assetDao().insertAll(entities)
+                val dbWatched = db.assetDao().getWatchedAssetIds()
+                if (dbWatched.isNotEmpty()) {
+                    _watchedAssetIds.value = dbWatched.toSet()
+                }
+                _imageAuditReport.value = imageAuditService.auditAndRepairAllAssets(
+                    liveTicks = marketEngine.ticks.value,
+                    firestoreRepository = if (authRepository.currentUser != null) firestoreRepository else null
+                )
+            }.onFailure { e ->
+                Log.e("LifeAssetsVM", "Startup asset audit error", e)
             }
         }
     }
 
     fun runAssetImageAuditNow() {
-        viewModelScope.launch {
-            val report = imageAuditService.auditAndRepairAllAssets(
-                liveTicks = marketEngine.ticks.value,
-                firestoreRepository = if (authRepository.currentUser != null) firestoreRepository else null
-            )
-            _imageAuditReport.value = report
-            postBanner(
-                "Asset Photo & Online Valuation Audit Complete: ${report.correctRealPhotosAdded}/${report.totalAssetsAudited} verified real photos (${report.remainingErrors} errors)"
-            )
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val report = imageAuditService.auditAndRepairAllAssets(
+                    liveTicks = marketEngine.ticks.value,
+                    firestoreRepository = if (authRepository.currentUser != null) firestoreRepository else null
+                )
+                _imageAuditReport.value = report
+                withContext(Dispatchers.Main) {
+                    postBanner(
+                        "Asset Photo & Online Valuation Audit Complete: ${report.correctRealPhotosAdded}/${report.totalAssetsAudited} verified real photos (${report.remainingErrors} errors)"
+                    )
+                }
+            }.onFailure { e ->
+                Log.e("LifeAssetsVM", "Manual asset audit error", e)
+            }
         }
     }
 
@@ -402,20 +426,24 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun startMarketSimulationLoop() {
         viewModelScope.launch {
-            marketEngine.syncLiveMarketDataFromProviders(force = true)
-            persistOnlineValuationsToRoom()
+            runCatching {
+                marketEngine.syncLiveMarketDataFromProviders(force = true)
+                persistOnlineValuationsToRoom()
+            }
             while (isActive) {
                 delay(2500L)
-                marketEngine.stepMarketTick()
-                marketEngine.syncLiveMarketDataFromProviders(force = false)
-                persistOnlineValuationsToRoom()
-                val filled = tradingService.evaluateOpenLimitOrders()
-                if (filled.isNotEmpty()) {
-                    val first = filled.first()
-                    postBanner("Limit Order Filled: ${first.side} ${first.quantity} ${first.assetSymbol} @ $${String.format("%,.2f", first.executionPrice)}")
-                    syncHoldingsWithFirestore()
+                runCatching {
+                    marketEngine.stepMarketTick()
+                    marketEngine.syncLiveMarketDataFromProviders(force = false)
+                    persistOnlineValuationsToRoom()
+                    val filled = tradingService.evaluateOpenLimitOrders()
+                    if (filled.isNotEmpty()) {
+                        val first = filled.first()
+                        postBanner("Limit Order Filled: ${first.side} ${first.quantity} ${first.assetSymbol} @ $${String.format("%,.2f", first.executionPrice)}")
+                        syncHoldingsWithFirestore()
+                    }
+                    refreshDailyRewardStatus()
                 }
-                refreshDailyRewardStatus()
             }
         }
     }

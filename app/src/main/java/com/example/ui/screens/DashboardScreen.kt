@@ -232,7 +232,7 @@ fun DashboardScreen(
                                     Color.Transparent
                                 ),
                                 center = Offset(w * 0.82f, h * 0.45f),
-                                radius = w * 0.38f
+                                radius = (w * 0.38f).coerceAtLeast(1f)
                             )
                         )
                         val bgCurve = Path().apply {

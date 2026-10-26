@@ -35,21 +35,27 @@ sealed interface AuthOperationState {
 }
 
 class AuthRepository(
-    private val firebaseAuth: FirebaseAuth = Firebase.auth
+    private val firebaseAuth: FirebaseAuth? = runCatching { Firebase.auth }.getOrNull()
 ) {
     private val _authState = MutableStateFlow<AuthOperationState>(
-        firebaseAuth.currentUser?.let {
+        runCatching { firebaseAuth?.currentUser }.getOrNull()?.let {
             AuthOperationState.Authenticated(it.uid, it.email, it.displayName)
         } ?: AuthOperationState.Idle
     )
     val authState: StateFlow<AuthOperationState> = _authState.asStateFlow()
 
     val currentUser: FirebaseUser?
-        get() = firebaseAuth.currentUser
+        get() = runCatching { firebaseAuth?.currentUser }.getOrNull()
 
     fun observeFirebaseUser(): Flow<FirebaseUser?> = callbackFlow {
-        val listener = FirebaseAuth.AuthStateListener { auth ->
-            val user = auth.currentUser
+        val auth = firebaseAuth
+        if (auth == null) {
+            trySend(null)
+            awaitClose { }
+            return@callbackFlow
+        }
+        val listener = FirebaseAuth.AuthStateListener { fbAuth ->
+            val user = fbAuth.currentUser
             if (user != null) {
                 _authState.value = AuthOperationState.Authenticated(user.uid, user.email, user.displayName)
             } else if (_authState.value is AuthOperationState.Authenticated) {
@@ -57,12 +63,13 @@ class AuthRepository(
             }
             trySend(user)
         }
-        firebaseAuth.addAuthStateListener(listener)
-        awaitClose { firebaseAuth.removeAuthStateListener(listener) }
+        runCatching { auth.addAuthStateListener(listener) }
+        awaitClose { runCatching { auth.removeAuthStateListener(listener) } }
     }
 
     suspend fun attemptAutoSignIn(context: Context): Result<FirebaseUser> {
-        firebaseAuth.currentUser?.let { return Result.success(it) }
+        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
+        auth.currentUser?.let { return Result.success(it) }
         val clientId = try {
             context.getString(R.string.default_web_client_id)
         } catch (e: Exception) {
@@ -86,7 +93,7 @@ class AuthRepository(
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
                 val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                val authResult = firebaseAuth.signInWithCredential(authCredential).await()
+                val authResult = auth.signInWithCredential(authCredential).await()
                 val user = checkNotNull(authResult.user) { "Firebase user was null after Google sign-in" }
                 _authState.value = AuthOperationState.Authenticated(user.uid, user.email, user.displayName)
                 Result.success(user)
@@ -101,6 +108,7 @@ class AuthRepository(
     }
 
     suspend fun signInWithGoogleInteractive(activityContext: Context): Result<FirebaseUser> {
+        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
         _authState.value = AuthOperationState.Loading
         val clientId = try {
             activityContext.getString(R.string.default_web_client_id)
@@ -110,19 +118,19 @@ class AuthRepository(
             return Result.failure(IllegalStateException(msg, e))
         }
 
-        val credentialManager = CredentialManager.create(activityContext)
-        val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
-        val request = GetCredentialRequest.Builder()
-            .addCredentialOption(signInOption)
-            .build()
-
         return try {
-            val result = credentialManager.getCredential(activityContext as Activity, request)
+            val credentialManager = CredentialManager.create(activityContext)
+            val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
+            val request = GetCredentialRequest.Builder()
+                .addCredentialOption(signInOption)
+                .build()
+
+            val result = credentialManager.getCredential(activityContext, request)
             val credential = result.credential
             if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                 val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
                 val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                val authResult = firebaseAuth.signInWithCredential(authCredential).await()
+                val authResult = auth.signInWithCredential(authCredential).await()
                 val user = checkNotNull(authResult.user) { "Authenticated user is null" }
                 _authState.value = AuthOperationState.Authenticated(user.uid, user.email, user.displayName)
                 Result.success(user)
@@ -147,9 +155,10 @@ class AuthRepository(
     }
 
     suspend fun signUpWithEmail(email: String, password: String, displayName: String? = null): Result<FirebaseUser> {
+        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
         _authState.value = AuthOperationState.Loading
         return try {
-            val authResult = firebaseAuth.createUserWithEmailAndPassword(email.trim(), password).await()
+            val authResult = auth.createUserWithEmailAndPassword(email.trim(), password).await()
             val user = checkNotNull(authResult.user) { "Firebase user was null after registration" }
             if (!displayName.isNullOrBlank()) {
                 try {
@@ -175,9 +184,10 @@ class AuthRepository(
     }
 
     suspend fun signInWithEmail(email: String, password: String): Result<FirebaseUser> {
+        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
         _authState.value = AuthOperationState.Loading
         return try {
-            val authResult = firebaseAuth.signInWithEmailAndPassword(email.trim(), password).await()
+            val authResult = auth.signInWithEmailAndPassword(email.trim(), password).await()
             val user = checkNotNull(authResult.user) { "Firebase user was null after login" }
             _authState.value = AuthOperationState.Authenticated(user.uid, user.email, user.displayName)
             Result.success(user)
@@ -193,8 +203,9 @@ class AuthRepository(
     }
 
     suspend fun sendPasswordResetEmail(email: String): Result<Unit> {
+        val auth = firebaseAuth ?: return Result.failure(IllegalStateException("Firebase Auth is not initialized"))
         return try {
-            firebaseAuth.sendPasswordResetEmail(email.trim()).await()
+            auth.sendPasswordResetEmail(email.trim()).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -206,7 +217,7 @@ class AuthRepository(
 
     suspend fun deleteAccount(context: Context): Result<Unit> {
         return try {
-            val user = firebaseAuth.currentUser
+            val user = firebaseAuth?.currentUser
             if (user != null) {
                 user.delete().await()
             }
@@ -222,7 +233,7 @@ class AuthRepository(
 
     suspend fun signOut(context: Context) {
         try {
-            firebaseAuth.signOut()
+            firebaseAuth?.signOut()
         } catch (e: Exception) {
             Log.e("Auth", "Firebase signOut failed", e)
         }

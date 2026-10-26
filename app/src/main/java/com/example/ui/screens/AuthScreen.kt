@@ -205,7 +205,7 @@ private fun SplashLandingContent(
                             Color.Transparent
                         ),
                         center = Offset(w * 0.55f, h * 0.55f),
-                        radius = w * 0.55f
+                        radius = (w * 0.55f).coerceAtLeast(1f)
                     )
                 )
 

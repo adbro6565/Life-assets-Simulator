@@ -865,6 +865,19 @@ class ExampleRobolectricTest {
         // Cash remains completely intact
         assertEquals(originalCash, db.userDao().getUserById(testUserId)!!.cashBalance, 0.001)
     }
+
+    @Test
+    fun viewModelAndAuthRepository_startupWithoutFirebaseAppInitialized_neverCrashesAndLoadsMarketTicks() = runBlocking {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val authRepo = com.example.data.auth.AuthRepository()
+        assertNotNull(authRepo.authState.value)
+
+        val vm = com.example.ui.viewmodel.LifeAssetsViewModel(app)
+        assertTrue(vm.marketTicks.value.isNotEmpty())
+        assertTrue(vm.getCandles("crypto_01", com.example.data.model.Timeframe.M15).isNotEmpty())
+        assertTrue(vm.getCandles("stk_01", com.example.data.model.Timeframe.M15).isNotEmpty())
+    }
 }
+
 
 
