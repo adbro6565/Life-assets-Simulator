@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.auth.AuthOperationState
 import com.example.data.auth.AuthRepository
+import com.example.data.auth.GoogleAuthMode
 import com.example.data.catalogue.AssetCatalogue
 import com.example.data.firestore.FirestoreHoldingRepository
 import com.example.data.local.DailyRewardEntity
@@ -234,6 +235,12 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
     private val _showGoogleEmailFallbackDialog = MutableStateFlow(false)
     val showGoogleEmailFallbackDialog: StateFlow<Boolean> = _showGoogleEmailFallbackDialog.asStateFlow()
 
+    private val _pendingGoogleAuthMode = MutableStateFlow(GoogleAuthMode.SIGN_IN)
+    val pendingGoogleAuthMode: StateFlow<GoogleAuthMode> = _pendingGoogleAuthMode.asStateFlow()
+
+    private val _verifiedRegisteredUid = MutableStateFlow<String?>(null)
+    val verifiedRegisteredUid: StateFlow<String?> = _verifiedRegisteredUid.asStateFlow()
+
     // Daily Reward Status
     private val _dailyRewardStatus = MutableStateFlow(
         DailyRewardStatus(
@@ -282,23 +289,27 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         val isAuth = _isAuthenticatedSession.value
         if (isAuth && activeUid.isNotBlank()) {
             viewModelScope.launch {
-                val existingUser = db.userDao().getUserById(activeUid)
-                if (existingUser != null) {
-                    _currentUser.value = existingUser
-                    observeUserStreams(activeUid)
+                val verifiedExisting = findOrMigrateExistingRegisteredProfile(activeUid, email = null)
+                if (verifiedExisting != null) {
+                    _verifiedRegisteredUid.value = verifiedExisting.userId
+                    _currentUser.value = verifiedExisting
+                    observeUserStreams(verifiedExisting.userId)
                     runCatching { refreshDailyRewardStatus() }
-                } else if (authRepository.currentUser == null) {
-                    // Invalid or revoked session with no profile: safely reset to Login screen
+                } else {
+                    // Never trust client-side boolean alone: if no registered profile exists, revoke session
                     _isAuthenticatedSession.value = false
+                    _verifiedRegisteredUid.value = null
                     _currentUserId.value = ""
+                    clearInMemoryUserData()
                     prefs.edit()
                         .putBoolean("is_authenticated_session", false)
                         .remove("active_user_id")
                         .apply()
                 }
             }
-        } else if (isAuth && activeUid.isBlank() && authRepository.currentUser == null) {
+        } else if (isAuth) {
             _isAuthenticatedSession.value = false
+            _verifiedRegisteredUid.value = null
             prefs.edit().putBoolean("is_authenticated_session", false).apply()
         }
 
@@ -375,18 +386,22 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    suspend fun provisionOrLoadGoogleIdentity(
+    /**
+     * Checks whether [uid] (or a legacy account matching [email]) already has a valid
+     * registered user profile in Room or Firestore (`/users/{uid}`).
+     * Does NOT create a new profile if unregistered.
+     */
+    private suspend fun findOrMigrateExistingRegisteredProfile(
         uid: String,
-        email: String?,
-        displayName: String?
-    ): UserEntity = authProvisionMutex.withLock {
+        email: String?
+    ): UserEntity? {
         val canonicalUid = uid.trim()
-        require(canonicalUid.isNotBlank()) { "Authenticated UID cannot be blank" }
+        if (canonicalUid.isBlank()) return null
         val cleanEmail = email?.trim()?.takeIf { it.isNotBlank() }
 
         var existing = db.userDao().getUserById(canonicalUid)
 
-        // Safe migration if a legacy local account had the same verified email under an old generated ID
+        // Safe migration for existing legitimate users whose profile was stored under a legacy ID with the same email
         if (existing == null && cleanEmail != null) {
             val legacyByEmail = db.userDao().getUserByEmail(cleanEmail)
             if (legacyByEmail != null && legacyByEmail.userId != canonicalUid) {
@@ -403,46 +418,31 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
 
-        if (existing == null) {
-            val remoteProfile = firestoreRepository?.getUserProfile(canonicalUid)?.getOrNull()
+        // Check Firestore server-controlled registration profile if local Room cache is empty (e.g., reinstall)
+        if (existing == null && authRepository.currentUser?.uid == canonicalUid) {
+            val remoteProfile = kotlinx.coroutines.withTimeoutOrNull(2500L) {
+                firestoreRepository?.verifyRegisteredUserProfile(canonicalUid)?.getOrNull()
+            }
             if (remoteProfile != null) {
                 backendQuotaMonitor.recordReads(1)
-            }
-            val baseName = (remoteProfile?.username?.takeIf { it.isNotBlank() }
-                ?: displayName?.takeIf { it.isNotBlank() }
-                ?: cleanEmail?.substringBefore("@")
-                ?: "Trader")
-                .replace(Regex("[^a-zA-Z0-9_]"), "_")
-                .take(15)
-                .ifBlank { "Trader" }
-            val uniqueName = ensureUniqueUsernameCandidate(baseName)
-            val initialCash = remoteProfile?.cashBalance ?: STARTING_CASH_USD
-            val entity = UserEntity(
-                userId = canonicalUid,
-                username = uniqueName,
-                normalizedUsername = uniqueName.lowercase(),
-                email = cleanEmail ?: "$uniqueName@lifeassets.io",
-                passwordHash = hashPassword(canonicalUid),
-                cashBalance = initialCash,
-                realizedPnL = 0.0,
-                streakDays = remoteProfile?.streakDays?.toInt() ?: 1,
-                lastClaimDateKathmandu = remoteProfile?.lastClaimDateKathmandu
-            )
-            db.userDao().upsertUser(entity)
-            if (remoteProfile == null) {
-                for ((assetId, qty, avgCost) in STARTER_PORTFOLIO_3M_HOLDINGS) {
-                    db.holdingDao().upsertHolding(
-                        HoldingEntity(
-                            userId = canonicalUid,
-                            assetId = assetId,
-                            quantity = qty,
-                            averageCostBasis = avgCost,
-                            reservedQuantity = 0.0
-                        )
-                    )
-                }
-            } else {
-                // Restore returning user's cloud holdings into Room without overwriting with starter assets
+                val baseName = remoteProfile.username.takeIf { it.isNotBlank() }
+                    ?: remoteProfile.displayName?.takeIf { it.isNotBlank() }
+                    ?: cleanEmail?.substringBefore("@")
+                    ?: "Trader"
+                val sanitized = baseName.replace(Regex("[^a-zA-Z0-9_]"), "_").take(15).ifBlank { "Trader" }
+                val uniqueName = ensureUniqueUsernameCandidate(sanitized)
+                val restoredEntity = UserEntity(
+                    userId = canonicalUid,
+                    username = uniqueName,
+                    normalizedUsername = uniqueName.lowercase(),
+                    email = cleanEmail ?: "$uniqueName@lifeassets.io",
+                    passwordHash = hashPassword(canonicalUid),
+                    cashBalance = remoteProfile.cashBalance,
+                    realizedPnL = 0.0,
+                    streakDays = remoteProfile.streakDays.toInt().coerceAtLeast(1),
+                    lastClaimDateKathmandu = remoteProfile.lastClaimDateKathmandu
+                )
+                db.userDao().upsertUser(restoredEntity)
                 val cloudHoldings = firestoreRepository?.getHoldings(canonicalUid)?.getOrNull().orEmpty()
                 for (ch in cloudHoldings) {
                     if (ch.assetId.isNotBlank() && ch.quantity > 0.0) {
@@ -457,27 +457,97 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                         )
                     }
                 }
+                existing = restoredEntity
             }
-            multiplayerService.seedInitialOffersIfNeeded(canonicalUid, uniqueName)
-            existing = entity
         }
 
-        switchActiveUser(existing.userId)
-        _currentUser.value = existing
-        syncHoldingsWithFirestore()
-        existing
+        return existing
+    }
+
+    /**
+     * Creates a brand-new registered account for [uid] during Sign-Up only.
+     */
+    private suspend fun createNewRegisteredGoogleProfile(
+        uid: String,
+        email: String?,
+        displayName: String?
+    ): UserEntity {
+        val canonicalUid = uid.trim()
+        require(canonicalUid.isNotBlank()) { "Authenticated UID cannot be blank" }
+        val cleanEmail = email?.trim()?.takeIf { it.isNotBlank() }
+        val baseName = (displayName?.takeIf { it.isNotBlank() }
+            ?: cleanEmail?.substringBefore("@")
+            ?: "Trader")
+            .replace(Regex("[^a-zA-Z0-9_]"), "_")
+            .take(15)
+            .ifBlank { "Trader" }
+        val uniqueName = ensureUniqueUsernameCandidate(baseName)
+        val entity = UserEntity(
+            userId = canonicalUid,
+            username = uniqueName,
+            normalizedUsername = uniqueName.lowercase(),
+            email = cleanEmail ?: "$uniqueName@lifeassets.io",
+            passwordHash = hashPassword(canonicalUid),
+            cashBalance = STARTING_CASH_USD,
+            realizedPnL = 0.0,
+            streakDays = 1,
+            lastClaimDateKathmandu = null
+        )
+        db.userDao().upsertUser(entity)
+        for ((assetId, qty, avgCost) in STARTER_PORTFOLIO_3M_HOLDINGS) {
+            db.holdingDao().upsertHolding(
+                HoldingEntity(
+                    userId = canonicalUid,
+                    assetId = assetId,
+                    quantity = qty,
+                    averageCostBasis = avgCost,
+                    reservedQuantity = 0.0
+                )
+            )
+        }
+        multiplayerService.seedInitialOffersIfNeeded(canonicalUid, uniqueName)
+        if (authRepository.currentUser?.uid == canonicalUid) {
+            runCatching {
+                firestoreRepository?.registerNewUserProfile(
+                    username = uniqueName,
+                    displayName = displayName,
+                    cashBalance = STARTING_CASH_USD,
+                    netWorth = STARTING_CASH_USD + STARTING_ASSET_ALLOCATION_USD,
+                    streakDays = 1,
+                    lastClaimDateKathmandu = null
+                )
+            }
+        }
+        return entity
+    }
+
+    private suspend fun requireVerifiedRegisteredAccount(): UserEntity? {
+        val uid = _currentUserId.value.trim()
+        if (!_isAuthenticatedSession.value || uid.isBlank() || _verifiedRegisteredUid.value != uid) {
+            postBanner("Account not registered. Please Sign Up first.")
+            return null
+        }
+        val registeredUser = db.userDao().getUserById(uid)
+        if (registeredUser == null) {
+            _isAuthenticatedSession.value = false
+            _verifiedRegisteredUid.value = null
+            clearInMemoryUserData()
+            postBanner("Account not registered. Please Sign Up first.")
+            return null
+        }
+        return registeredUser
     }
 
     private fun observeFirebaseAuthChanges() {
         viewModelScope.launch {
             authRepository.observeFirebaseUser().collect { fbUser ->
-                if (fbUser != null) {
-                    val userEntity = provisionOrLoadGoogleIdentity(
-                        uid = fbUser.uid,
-                        email = fbUser.email,
-                        displayName = fbUser.displayName
-                    )
-                    _currentUser.value = userEntity
+                // Never auto-create a profile or auto-grant dashboard access on raw Firebase auth state changes.
+                // Only refresh if the user is already verified and registered in the active session.
+                if (fbUser != null && _isAuthenticatedSession.value && _verifiedRegisteredUid.value == fbUser.uid) {
+                    val existing = db.userDao().getUserById(fbUser.uid)
+                    if (existing != null) {
+                        _currentUser.value = existing
+                    }
                 }
             }
         }
@@ -667,7 +737,8 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
 
         viewModelScope.launch {
             try {
-                val uid = _currentUserId.value
+                val verifiedUser = requireVerifiedRegisteredAccount() ?: return@launch
+                val uid = verifiedUser.userId
                 if (intent.orderType == OrderType.MARKET) {
                     val result = tradingService.executeMarketOrder(
                         userId = uid,
@@ -715,7 +786,8 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
 
     fun cancelLimitOrder(orderId: String) {
         viewModelScope.launch {
-            val res = tradingService.cancelLimitOrder(_currentUserId.value, orderId)
+            val verifiedUser = requireVerifiedRegisteredAccount() ?: return@launch
+            val res = tradingService.cancelLimitOrder(verifiedUser.userId, orderId)
             res.onSuccess {
                 postBanner("Limit order cancelled and reserved funds/inventory restored.")
             }.onFailure {
@@ -728,7 +800,8 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
 
     fun claimDailyReward() {
         viewModelScope.launch {
-            val res = dailyRewardService.claimDailyReward(_currentUserId.value)
+            val verifiedUser = requireVerifiedRegisteredAccount() ?: return@launch
+            val res = dailyRewardService.claimDailyReward(verifiedUser.userId)
             res.onSuccess { claim ->
                 refreshDailyRewardStatus()
                 postBanner("Daily Reward Claimed! +$${String.format("%,.2f", claim.rewardAmount)} (Day ${claim.streakDay} Streak • ${claim.claimDateKathmandu} NPT)")
@@ -819,7 +892,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         requestedCash: Double
     ) {
         viewModelScope.launch {
-            val user = _currentUser.value ?: return@launch
+            val user = requireVerifiedRegisteredAccount() ?: return@launch
             val res = multiplayerService.createP2PTradeOffer(
                 senderUserId = user.userId,
                 senderUsername = user.username,
@@ -838,7 +911,8 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
 
     fun acceptP2POffer(offerId: String) {
         viewModelScope.launch {
-            val res = multiplayerService.acceptTradeOffer(_currentUserId.value, offerId)
+            val user = requireVerifiedRegisteredAccount() ?: return@launch
+            val res = multiplayerService.acceptTradeOffer(user.userId, offerId)
             res.onSuccess { offer ->
                 postBanner("P2P Trade Settled: Acquired ${offer.offeredQuantity} × ${offer.offeredAssetName} for $${String.format("%,.2f", offer.requestedCash)}")
                 syncHoldingsWithFirestore()
@@ -850,7 +924,8 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
 
     fun declineP2POffer(offerId: String) {
         viewModelScope.launch {
-            multiplayerService.declineTradeOffer(_currentUserId.value, offerId)
+            val user = requireVerifiedRegisteredAccount() ?: return@launch
+            multiplayerService.declineTradeOffer(user.userId, offerId)
             postBanner("P2P trade offer declined.")
         }
     }
@@ -933,10 +1008,88 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         postBanner("Google Sign-In was cancelled.")
     }
 
+    private suspend fun handleGoogleAuthResult(
+        context: Context,
+        uid: String,
+        email: String?,
+        displayName: String?,
+        mode: GoogleAuthMode
+    ) = authProvisionMutex.withLock {
+        val canonicalUid = uid.trim()
+        if (canonicalUid.isBlank()) {
+            postBanner("Google authentication returned an invalid user ID.")
+            return@withLock
+        }
+        val cleanEmail = email?.trim()?.takeIf { it.isNotBlank() }
+        val existingUser = findOrMigrateExistingRegisteredProfile(canonicalUid, cleanEmail)
+
+        when (mode) {
+            GoogleAuthMode.SIGN_IN -> {
+                if (existingUser == null) {
+                    // Unregistered user attempted Login: deny dashboard access, clear temporary auth session, do NOT create profile
+                    _isAuthenticatedSession.value = false
+                    _verifiedRegisteredUid.value = null
+                    _currentUserId.value = ""
+                    clearInMemoryUserData()
+                    prefs.edit()
+                        .putBoolean("is_authenticated_session", false)
+                        .remove("active_user_id")
+                        .apply()
+                    _showGoogleEmailFallbackDialog.value = false
+                    postBanner("Account not registered. Please Sign Up first.")
+                    authRepository.signOut(context)
+                    return@withLock
+                }
+                _verifiedRegisteredUid.value = existingUser.userId
+                switchActiveUser(existingUser.userId)
+                _currentUser.value = existingUser
+                markAuthenticated(true)
+                _showAuthModal.value = false
+                _showGoogleEmailFallbackDialog.value = false
+                syncHoldingsWithFirestore()
+                postBanner("Signed in with Google as @${existingUser.username} (${existingUser.email})")
+            }
+
+            GoogleAuthMode.SIGN_UP -> {
+                if (existingUser != null) {
+                    // Existing registered user attempted Sign Up: do NOT create duplicate profile or reset balances
+                    _showGoogleEmailFallbackDialog.value = false
+                    postBanner("Account already exists. Please Sign In.")
+                    if (!_isAuthenticatedSession.value || _verifiedRegisteredUid.value != existingUser.userId) {
+                        _isAuthenticatedSession.value = false
+                        _verifiedRegisteredUid.value = null
+                        _currentUserId.value = ""
+                        clearInMemoryUserData()
+                        prefs.edit()
+                            .putBoolean("is_authenticated_session", false)
+                            .remove("active_user_id")
+                            .apply()
+                        authRepository.signOut(context)
+                    }
+                    return@withLock
+                }
+                val newUser = createNewRegisteredGoogleProfile(
+                    uid = canonicalUid,
+                    email = cleanEmail,
+                    displayName = displayName
+                )
+                _verifiedRegisteredUid.value = newUser.userId
+                switchActiveUser(newUser.userId)
+                _currentUser.value = newUser
+                markAuthenticated(true)
+                _showAuthModal.value = false
+                _showGoogleEmailFallbackDialog.value = false
+                syncHoldingsWithFirestore()
+                postBanner("Signed up with Google as @${newUser.username} (${newUser.email})")
+            }
+        }
+    }
+
     fun completeSystemGoogleAccountSelection(
         email: String,
         displayName: String? = null,
-        explicitUid: String? = null
+        explicitUid: String? = null,
+        mode: GoogleAuthMode = _pendingGoogleAuthMode.value
     ) {
         if (backendService.connectionStatus.value == com.example.data.model.ConnectionStatus.OFFLINE) {
             postBanner("No Internet Connection. Online backend is required to sign in.")
@@ -953,15 +1106,26 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
             val effectiveName = displayName?.trim()?.takeIf { it.isNotBlank() }
                 ?: cleanEmail.substringBefore("@")
             authRepository.markGoogleAccountAuthenticated(uid, cleanEmail, effectiveName)
-            val userEntity = provisionOrLoadGoogleIdentity(uid, cleanEmail, effectiveName)
-            markAuthenticated(true)
-            _showAuthModal.value = false
-            _showGoogleEmailFallbackDialog.value = false
-            postBanner("Signed in with Google as @${userEntity.username} (${userEntity.email})")
+            handleGoogleAuthResult(
+                context = getApplication(),
+                uid = uid,
+                email = cleanEmail,
+                displayName = effectiveName,
+                mode = mode
+            )
         }
     }
 
+    fun signUpWithGoogle(activityContext: Context) {
+        startGoogleAuthentication(activityContext, GoogleAuthMode.SIGN_UP)
+    }
+
     fun signInWithGoogle(activityContext: Context) {
+        startGoogleAuthentication(activityContext, GoogleAuthMode.SIGN_IN)
+    }
+
+    private fun startGoogleAuthentication(activityContext: Context, mode: GoogleAuthMode) {
+        _pendingGoogleAuthMode.value = mode
         if (backendService.connectionStatus.value == com.example.data.model.ConnectionStatus.OFFLINE) {
             postBanner("No Internet Connection. Online backend is required to sign in.")
             return
@@ -969,15 +1133,13 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             val res = authRepository.signInWithGoogleInteractive(activityContext)
             res.onSuccess { googleAccount ->
-                val userEntity = provisionOrLoadGoogleIdentity(
+                handleGoogleAuthResult(
+                    context = activityContext,
                     uid = googleAccount.uid,
                     email = googleAccount.email,
-                    displayName = googleAccount.displayName
+                    displayName = googleAccount.displayName,
+                    mode = mode
                 )
-                markAuthenticated(true)
-                _showAuthModal.value = false
-                _showGoogleEmailFallbackDialog.value = false
-                postBanner("Signed in with Google as @${userEntity.username} (${userEntity.email})")
             }.onFailure { err ->
                 val isActivityHost = activityContext is android.app.Activity ||
                     (activityContext is android.content.ContextWrapper && activityContext !is android.app.Application)
@@ -1023,7 +1185,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                 // Prevent duplicate registration for an already-registered email
                 val existingByEmail = db.userDao().getUserByEmail(rawEmail)
                 if (existingByEmail != null) {
-                    postBanner("An account with this email already exists. Please log in.")
+                    postBanner("Account already exists. Please Sign In.")
                     return@withLock
                 }
 
@@ -1035,6 +1197,10 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                 val fbResult = authRepository.signUpWithEmail(rawEmail, password, cleanUser)
                 fbResult.onSuccess { fbUser ->
                     val uid = fbUser.uid
+                    if (db.userDao().getUserById(uid) != null) {
+                        postBanner("Account already exists. Please Sign In.")
+                        return@onSuccess
+                    }
                     val newUser = UserEntity(
                         userId = uid,
                         username = cleanUser,
@@ -1062,6 +1228,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                     }
 
                     multiplayerService.seedInitialOffersIfNeeded(uid, cleanUser)
+                    _verifiedRegisteredUid.value = uid
                     switchActiveUser(uid)
                     markAuthenticated(true)
                     _showAuthModal.value = false
@@ -1070,10 +1237,14 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                 }.onFailure { err ->
                     val msg = err.localizedMessage ?: err.message ?: "Registration failed."
                     if (msg.contains("already in use", ignoreCase = true) || msg.contains("collision", ignoreCase = true)) {
-                        postBanner("An account with this email already exists. Please log in.")
+                        postBanner("Account already exists. Please Sign In.")
                     } else {
                         // Deterministic UID fallback for environments without active Firebase Auth emulator
                         val newId = com.example.data.auth.AuthRepository.deterministicGoogleUid(rawEmail)
+                        if (db.userDao().getUserById(newId) != null) {
+                            postBanner("Account already exists. Please Sign In.")
+                            return@onFailure
+                        }
                         val newUser = UserEntity(
                             userId = newId,
                             username = cleanUser,
@@ -1098,6 +1269,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                             )
                         }
                         multiplayerService.seedInitialOffersIfNeeded(newId, cleanUser)
+                        _verifiedRegisteredUid.value = newId
                         switchActiveUser(newId)
                         markAuthenticated(true)
                         _showAuthModal.value = false
@@ -1134,26 +1306,17 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                 if (fbResult.isSuccess) {
                     val fbUser = fbResult.getOrThrow()
                     val uid = fbUser.uid
-                    var user = db.userDao().getUserById(uid)
+                    val user = findOrMigrateExistingRegisteredProfile(uid, fbUser.email ?: effectiveEmail)
                     if (user == null) {
-                        val remoteProfile = firestoreRepository?.getUserProfile(uid)?.getOrNull()
-                        val uName = remoteProfile?.username?.takeIf { it.isNotBlank() }
-                            ?: fbUser.displayName
-                            ?: trimmed.substringBefore("@")
-                        user = UserEntity(
-                            userId = uid,
-                            username = uName,
-                            normalizedUsername = uName.lowercase(),
-                            email = fbUser.email ?: effectiveEmail,
-                            passwordHash = hashPassword(password),
-                            cashBalance = remoteProfile?.cashBalance ?: STARTING_CASH_USD,
-                            realizedPnL = 0.0,
-                            streakDays = remoteProfile?.streakDays?.toInt() ?: 1,
-                            lastClaimDateKathmandu = remoteProfile?.lastClaimDateKathmandu
-                        )
-                        db.userDao().upsertUser(user)
+                        // Never auto-create a profile from Login!
+                        authRepository.signOut(getApplication())
+                        _isAuthenticatedSession.value = false
+                        _verifiedRegisteredUid.value = null
+                        postBanner("Account not registered. Please Sign Up first.")
+                        return@launch
                     }
-                    switchActiveUser(uid)
+                    _verifiedRegisteredUid.value = user.userId
+                    switchActiveUser(user.userId)
                     markAuthenticated(true)
                     _showAuthModal.value = false
                     syncHoldingsWithFirestore()
@@ -1168,13 +1331,14 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                     postBanner("Invalid password for '${existingLocalUser.username}'. Please try again.")
                     return@launch
                 }
+                _verifiedRegisteredUid.value = existingLocalUser.userId
                 switchActiveUser(existingLocalUser.userId)
                 markAuthenticated(true)
                 _showAuthModal.value = false
                 syncHoldingsWithFirestore()
                 postBanner("Welcome back, @${existingLocalUser.username}!")
             } else {
-                postBanner("No account found for '$trimmed'. Please check your credentials or Sign Up.")
+                postBanner("Account not registered. Please Sign Up first.")
             }
         }
     }
@@ -1200,9 +1364,6 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
             val uid = _currentUserId.value
             if (uid.isNotBlank()) {
                 try {
-                    db.userDao().getUserById(uid)?.let { u ->
-                        // Clean up user from local Room database
-                    }
                     for (h in _holdings.value) {
                         db.holdingDao().deleteHolding(uid, h.assetId)
                     }
@@ -1218,6 +1379,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
 
     fun updateUniqueUsername(newUsername: String) {
         viewModelScope.launch {
+            val current = requireVerifiedRegisteredAccount() ?: return@launch
             val clean = newUsername.trim()
             if (!USERNAME_REGEX.matches(clean)) {
                 postBanner("Username must be 3–20 alphanumeric/underscore characters.")
@@ -1225,7 +1387,6 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
             }
             val normalized = clean.lowercase()
             val conflict = db.userDao().getUserByNormalizedUsername(normalized)
-            val current = _currentUser.value ?: return@launch
             if (conflict != null && conflict.userId != current.userId) {
                 postBanner("Username '@$clean' is already claimed by another trader.")
                 return@launch
@@ -1243,6 +1404,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
 
     fun signOut(context: Context) {
         _isAuthenticatedSession.value = false
+        _verifiedRegisteredUid.value = null
         prefs.edit()
             .putBoolean("is_authenticated_session", false)
             .remove("active_user_id")
@@ -1251,9 +1413,9 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         _showAuthModal.value = false
         _requestSystemGoogleAccountPicker.value = false
         _showGoogleEmailFallbackDialog.value = false
+        postBanner("You have logged out of Life Assets Simulator.")
         viewModelScope.launch {
             authRepository.signOut(context)
-            postBanner("You have logged out of Life Assets Simulator.")
         }
     }
 

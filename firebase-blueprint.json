@@ -33,6 +33,11 @@
           "type": "string",
           "description": "Last daily reward claim date in yyyy-MM-dd format (Asia/Kathmandu)."
         },
+        "registrationStatus": {
+          "type": "string",
+          "enum": ["REGISTERED"],
+          "description": "Server-validated registration status proving the user completed registration."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

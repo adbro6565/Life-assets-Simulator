@@ -63,6 +63,7 @@ data class FirestoreUserProfile(
     val netWorth: Double = 7000000.0,
     val streakDays: Long = 0L,
     val lastClaimDateKathmandu: String? = null,
+    val registrationStatus: String = "REGISTERED",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )

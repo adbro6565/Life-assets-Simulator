@@ -37,6 +37,11 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
+enum class GoogleAuthMode {
+    SIGN_IN,
+    SIGN_UP
+}
+
 data class GoogleSignInAccountResult(
     val uid: String,
     val email: String,
@@ -321,14 +326,17 @@ class AuthRepository(
     }
 
     suspend fun signOut(context: Context) {
+        _authState.value = AuthOperationState.Idle
         try {
             firebaseAuth?.signOut()
         } catch (e: Exception) {
             Log.e("Auth", "Firebase signOut failed", e)
         }
         try {
-            val credentialManager = CredentialManager.create(context)
-            credentialManager.clearCredentialState(ClearCredentialStateRequest())
+            kotlinx.coroutines.withTimeoutOrNull(800L) {
+                val credentialManager = CredentialManager.create(context)
+                credentialManager.clearCredentialState(ClearCredentialStateRequest())
+            }
         } catch (e: Exception) {
             Log.e("Auth", "Failed to clear credential state", e)
         } finally {

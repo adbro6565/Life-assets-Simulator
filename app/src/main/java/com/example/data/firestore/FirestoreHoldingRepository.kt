@@ -410,6 +410,78 @@ class FirestoreHoldingRepository(
         }
     }
 
+    /**
+     * Verifies whether [userId] has a valid registered account profile in Firestore (`/users/{userId}`).
+     * Existing legitimate users without an explicit `registrationStatus` field are recognized if
+     * their document exists with a valid `userId` and non-negative `cashBalance`.
+     */
+    suspend fun verifyRegisteredUserProfile(userId: String = requireUserId()): Result<FirestoreUserProfile?> {
+        val path = "users/$userId"
+        return try {
+            val doc = db.collection("users").document(userId).get().await()
+            if (!doc.exists()) {
+                return Result.success(null)
+            }
+            val rawStatus = doc.getString("registrationStatus")
+            val docUserId = doc.getString("userId")
+            val isLegacyValid = rawStatus == null && docUserId == userId
+            if (rawStatus != "REGISTERED" && !isLegacyValid) {
+                return Result.success(null)
+            }
+            val profile = doc.toObject(
+                FirestoreUserProfile::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+            )
+            Result.success(profile)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, path)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Atomically registers a brand-new user profile in Firestore (`/users/{uid}`).
+     * Fails with [IllegalStateException] if a registered profile already exists for [uid].
+     */
+    suspend fun registerNewUserProfile(
+        username: String,
+        displayName: String?,
+        cashBalance: Double,
+        netWorth: Double,
+        streakDays: Int = 1,
+        lastClaimDateKathmandu: String? = null
+    ): Result<Unit> {
+        val uid = requireUserId()
+        val docRef = db.collection("users").document(uid)
+        return try {
+            val existing = docRef.get().await()
+            if (existing.exists()) {
+                return Result.failure(IllegalStateException("Account already exists. Please Sign In."))
+            }
+            val payload = mutableMapOf<String, Any>(
+                "userId" to uid,
+                "username" to username,
+                "cashBalance" to cashBalance.coerceAtLeast(0.0),
+                "netWorth" to netWorth.coerceAtLeast(0.0),
+                "streakDays" to streakDays.toLong(),
+                "registrationStatus" to "REGISTERED",
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            if (displayName != null) payload["displayName"] = displayName
+            if (lastClaimDateKathmandu != null) payload["lastClaimDateKathmandu"] = lastClaimDateKathmandu
+            docRef.set(payload).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docRef.path)
+            Result.failure(e)
+        }
+    }
+
     suspend fun syncUserProfile(
         username: String,
         displayName: String?,
@@ -434,6 +506,7 @@ class FirestoreHoldingRepository(
                 "cashBalance" to cashBalance.coerceAtLeast(0.0),
                 "netWorth" to netWorth.coerceAtLeast(0.0),
                 "streakDays" to streakDays.toLong(),
+                "registrationStatus" to "REGISTERED",
                 "createdAt" to createdAt,
                 "updatedAt" to FieldValue.serverTimestamp()
             )

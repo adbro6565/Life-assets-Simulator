@@ -128,6 +128,7 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
     val showAuthModal by viewModel.showAuthModal.collectAsStateWithLifecycle()
     val requestSystemGoogleAccountPicker by viewModel.requestSystemGoogleAccountPicker.collectAsStateWithLifecycle()
     val showGoogleEmailFallbackDialog by viewModel.showGoogleEmailFallbackDialog.collectAsStateWithLifecycle()
+    val verifiedRegisteredUid by viewModel.verifiedRegisteredUid.collectAsStateWithLifecycle()
 
     val lifeBotMessages by viewModel.lifeBotMessages.collectAsStateWithLifecycle()
     val isLifeBotThinking by viewModel.isLifeBotThinking.collectAsStateWithLifecycle()
@@ -275,7 +276,7 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
     }
 
     // First-launch Onboarding & Auth Flow: Splash -> Sign Up / Log In -> Home Dashboard
-    if (!isAuthenticatedSession) {
+    if (!isAuthenticatedSession || verifiedRegisteredUid == null) {
         Scaffold(
             modifier = Modifier
                 .fillMaxSize()
@@ -292,6 +293,7 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
                     statusBanner = statusBanner,
                     onClearBanner = { viewModel.clearBanner() },
                     onSignInWithGoogle = { viewModel.signInWithGoogle(context) },
+                    onSignUpWithGoogle = { viewModel.signUpWithGoogle(context) },
                     onRegisterAccount = { uname, email, pass ->
                         currentDestination = AppDestination.DASHBOARD
                         viewModel.registerUniqueUsernameAccount(uname, email, pass)
@@ -309,8 +311,8 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
         return
     }
 
-    // Show the dashboard only after authentication and profile loading are complete
-    if (user == null) {
+    // Show the dashboard only after authentication and registered profile verification are complete
+    if (user == null || user?.userId != verifiedRegisteredUid) {
         Scaffold(
             modifier = Modifier
                 .fillMaxSize()

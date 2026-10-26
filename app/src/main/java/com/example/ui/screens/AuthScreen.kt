@@ -93,6 +93,7 @@ fun OnboardingAuthFlowScreen(
     statusBanner: String?,
     onClearBanner: () -> Unit,
     onSignInWithGoogle: () -> Unit,
+    onSignUpWithGoogle: () -> Unit = onSignInWithGoogle,
     onRegisterAccount: (username: String, email: String, password: String) -> Unit,
     onLoginWithEmailOrUsername: (emailOrUsername: String, password: String) -> Unit,
     onForgotPassword: (email: String) -> Unit
@@ -122,6 +123,8 @@ fun OnboardingAuthFlowScreen(
         when (authStage) {
             0 -> {
                 SplashLandingContent(
+                    statusBanner = statusBanner,
+                    onClearBanner = onClearBanner,
                     onSignUpClick = { authStage = 2 },
                     onLogInClick = { authStage = 1 },
                     onSignInWithGoogle = onSignInWithGoogle
@@ -136,6 +139,7 @@ fun OnboardingAuthFlowScreen(
                     onBackToSplash = { authStage = 0 },
                     onSwitchMode = { isSignUp -> authStage = if (isSignUp) 2 else 1 },
                     onSignInWithGoogle = onSignInWithGoogle,
+                    onSignUpWithGoogle = onSignUpWithGoogle,
                     onRegisterAccount = onRegisterAccount,
                     onLoginWithEmailOrUsername = onLoginWithEmailOrUsername,
                     onForgotPassword = onForgotPassword
@@ -147,6 +151,8 @@ fun OnboardingAuthFlowScreen(
 
 @Composable
 private fun SplashLandingContent(
+    statusBanner: String?,
+    onClearBanner: () -> Unit,
     onSignUpClick: () -> Unit,
     onLogInClick: () -> Unit,
     onSignInWithGoogle: () -> Unit
@@ -160,6 +166,26 @@ private fun SplashLandingContent(
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         Spacer(modifier = Modifier.height(8.dp))
+
+        statusBanner?.let { bannerMsg ->
+            Surface(
+                color = DarkCardBg,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .border(1.dp, EmeraldAccent.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                    .clickable { onClearBanner() }
+            ) {
+                Text(
+                    text = bannerMsg,
+                    color = TextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(12.dp)
+                )
+            }
+        }
 
         // Top Branding & Tagline
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -406,6 +432,7 @@ private fun LoginSignupContent(
     onBackToSplash: () -> Unit,
     onSwitchMode: (Boolean) -> Unit,
     onSignInWithGoogle: () -> Unit,
+    onSignUpWithGoogle: () -> Unit,
     onRegisterAccount: (username: String, email: String, password: String) -> Unit,
     onLoginWithEmailOrUsername: (emailOrUsername: String, password: String) -> Unit,
     onForgotPassword: (email: String) -> Unit
@@ -739,13 +766,19 @@ private fun LoginSignupContent(
 
         Spacer(modifier = Modifier.height(18.dp))
 
-        // Continue with Google Button
+        // Sign Up with Google / Sign In with Google Button
         OutlinedButton(
-            onClick = onSignInWithGoogle,
+            onClick = {
+                if (isSignUpMode) {
+                    onSignUpWithGoogle()
+                } else {
+                    onSignInWithGoogle()
+                }
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp)
-                .testTag("google_sign_in_button"),
+                .testTag(if (isSignUpMode) "google_sign_up_button" else "google_sign_in_button"),
             shape = RoundedCornerShape(12.dp),
             border = BorderStroke(1.dp, SubtleCardBorder),
             colors = ButtonDefaults.outlinedButtonColors(

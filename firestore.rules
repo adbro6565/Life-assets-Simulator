@@ -40,8 +40,16 @@ service cloud.firestore {
              (data.netWorth is int || data.netWorth is float) && data.netWorth >= 0 &&
              (!('streakDays' in data) || (data.streakDays is int && data.streakDays >= 0 && data.streakDays <= 10000)) &&
              (!('lastClaimDateKathmandu' in data) || data.lastClaimDateKathmandu == null || (data.lastClaimDateKathmandu is string && data.lastClaimDateKathmandu.size() <= 16)) &&
+             (!('registrationStatus' in data) || data.registrationStatus == 'REGISTERED') &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isRegisteredUser(userId) {
+      return isSignedIn() &&
+             isValidId(userId) &&
+             request.auth.uid == userId &&
+             exists(/databases/$(database)/documents/users/$(userId));
     }
 
     function isValidHolding(data) {
@@ -102,17 +110,19 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
                        isValidId(userId) &&
                        request.auth.uid == userId &&
+                       !exists(/databases/$(database)/documents/users/$(userId)) &&
                        incoming().keys().hasAll(['userId', 'username', 'cashBalance', 'netWorth', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'cashBalance', 'netWorth', 'streakDays', 'lastClaimDateKathmandu', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'cashBalance', 'netWorth', 'streakDays', 'lastClaimDateKathmandu', 'registrationStatus', 'createdAt', 'updatedAt']) &&
                        isValidUserProfile(incoming());
 
       allow update: if isSignedIn() &&
                        isValidId(userId) &&
                        request.auth.uid == userId &&
+                       exists(/databases/$(database)/documents/users/$(userId)) &&
                        isValidUserProfile(incoming()) &&
                        incoming().userId == existing().userId &&
                        incoming().createdAt == existing().createdAt &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'cashBalance', 'netWorth', 'streakDays', 'lastClaimDateKathmandu', 'updatedAt']);
+                       incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'cashBalance', 'netWorth', 'streakDays', 'lastClaimDateKathmandu', 'registrationStatus', 'updatedAt']);
 
       allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
 
@@ -120,70 +130,58 @@ service cloud.firestore {
         allow get: if isSignedIn() && isValidId(userId) && isValidId(assetId) && request.auth.uid == userId;
         allow list: if isSignedIn() && request.auth.uid == userId;
 
-        allow create: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow create: if isRegisteredUser(userId) &&
                          isValidId(assetId) &&
-                         request.auth.uid == userId &&
                          incoming().assetId == assetId &&
                          incoming().keys().hasAll(['userId', 'assetId', 'symbol', 'name', 'category', 'quantity', 'averageCostBasis', 'createdAt', 'updatedAt']) &&
                          incoming().keys().hasOnly(['userId', 'assetId', 'symbol', 'name', 'category', 'quantity', 'averageCostBasis', 'imageUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'createdAt', 'updatedAt']) &&
                          isValidHolding(incoming());
 
-        allow update: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow update: if isRegisteredUser(userId) &&
                          isValidId(assetId) &&
-                         request.auth.uid == userId &&
                          isValidHolding(incoming()) &&
                          incoming().userId == existing().userId &&
                          incoming().assetId == existing().assetId &&
                          incoming().createdAt == existing().createdAt &&
                          incoming().diff(existing()).affectedKeys().hasOnly(['symbol', 'name', 'category', 'quantity', 'averageCostBasis', 'imageUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'updatedAt']);
 
-        allow delete: if isSignedIn() && isValidId(userId) && isValidId(assetId) && request.auth.uid == userId;
+        allow delete: if isRegisteredUser(userId) && isValidId(assetId);
       }
 
       match /assets/{assetId} {
         allow get: if isSignedIn() && isValidId(userId) && isValidId(assetId) && request.auth.uid == userId;
         allow list: if isSignedIn() && request.auth.uid == userId;
 
-        allow create: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow create: if isRegisteredUser(userId) &&
                          isValidId(assetId) &&
-                         request.auth.uid == userId &&
                          incoming().assetId == assetId &&
                          incoming().keys().hasAll(['userId', 'assetId', 'symbol', 'name', 'category', 'imageUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'createdAt', 'updatedAt']) &&
                          incoming().keys().hasOnly(['userId', 'assetId', 'symbol', 'name', 'category', 'imageUrl', 'thumbnailUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'priceSource', 'priceType', 'createdAt', 'updatedAt']) &&
                          isValidSyncedAsset(incoming());
 
-        allow update: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow update: if isRegisteredUser(userId) &&
                          isValidId(assetId) &&
-                         request.auth.uid == userId &&
                          isValidSyncedAsset(incoming()) &&
                          incoming().userId == existing().userId &&
                          incoming().assetId == existing().assetId &&
                          incoming().createdAt == existing().createdAt &&
                          incoming().diff(existing()).affectedKeys().hasOnly(['symbol', 'name', 'category', 'imageUrl', 'thumbnailUrl', 'imageSource', 'licenseInfo', 'verificationStatus', 'onlinePriceUsd', 'priceSource', 'priceType', 'updatedAt']);
 
-        allow delete: if isSignedIn() && isValidId(userId) && isValidId(assetId) && request.auth.uid == userId;
+        allow delete: if isRegisteredUser(userId) && isValidId(assetId);
       }
 
       match /orders/{orderId} {
         allow get: if isSignedIn() && isValidId(userId) && isValidId(orderId) && request.auth.uid == userId;
         allow list: if isSignedIn() && request.auth.uid == userId;
 
-        allow create: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow create: if isRegisteredUser(userId) &&
                          isValidId(orderId) &&
-                         request.auth.uid == userId &&
                          incoming().keys().hasAll(['userId', 'assetId', 'symbol', 'side', 'orderType', 'quantity', 'executionPrice', 'fee', 'totalAmount', 'status', 'createdAt', 'updatedAt']) &&
                          incoming().keys().hasOnly(['userId', 'assetId', 'symbol', 'side', 'orderType', 'quantity', 'executionPrice', 'fee', 'totalAmount', 'realizedPnL', 'status', 'createdAt', 'updatedAt']) &&
                          isValidTradeOrder(incoming());
 
-        allow update: if isSignedIn() &&
-                         isValidId(userId) &&
+        allow update: if isRegisteredUser(userId) &&
                          isValidId(orderId) &&
-                         request.auth.uid == userId &&
                          isValidTradeOrder(incoming()) &&
                          existing().status == 'OPEN' &&
                          incoming().userId == existing().userId &&
@@ -191,7 +189,7 @@ service cloud.firestore {
                          incoming().createdAt == existing().createdAt &&
                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
 
-        allow delete: if isSignedIn() && isValidId(userId) && isValidId(orderId) && request.auth.uid == userId;
+        allow delete: if isRegisteredUser(userId) && isValidId(orderId);
       }
     }
   }

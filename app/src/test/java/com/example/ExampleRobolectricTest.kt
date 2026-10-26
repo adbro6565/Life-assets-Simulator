@@ -900,21 +900,44 @@ class ExampleRobolectricTest {
         vm.signOut(app)
         pumpLooper()
         assertFalse("Unauthenticated user must see Login screen", vm.isAuthenticatedSession.value)
+        assertNull("Unauthenticated user must have null verifiedRegisteredUid", vm.verifiedRegisteredUid.value)
 
         // 5. Cancel Google Sign-In -> remain on login screen
         vm.onGoogleSignInCancelled()
         pumpLooper()
         assertFalse("Cancelling Google Sign-In must remain on Login screen", vm.isAuthenticatedSession.value)
 
-        // 1. New Google account -> successful first-time registration with $4M cash + $3M starter portfolio
+        // TEST A: New user clicks Sign In (LOGIN mode) -> denied, no registration or starting balance created
         val emailA = "alice.investor@gmail.com"
         val uidA = com.example.data.auth.AuthRepository.deterministicGoogleUid(emailA)
-        vm.completeSystemGoogleAccountSelection(emailA, "SameDisplayName")
+        vm.completeSystemGoogleAccountSelection(
+            email = emailA,
+            displayName = "SameDisplayName",
+            mode = com.example.data.auth.GoogleAuthMode.SIGN_IN
+        )
+        repeat(6) { pumpLooper(40) }
+        assertFalse("Unregistered user clicking Sign In must be denied dashboard access", vm.isAuthenticatedSession.value)
+        assertNull("Unregistered user clicking Sign In must not have verifiedRegisteredUid", vm.verifiedRegisteredUid.value)
+        assertNull("Unregistered user clicking Sign In must NOT create a database profile or starting cash", appDb.userDao().getUserById(uidA))
+        assertEquals("Account not registered. Please Sign Up first.", vm.statusBanner.value)
+
+        // TEST B: Unregistered user cannot access private APIs
+        vm.claimDailyReward()
+        repeat(3) { pumpLooper(30) }
+        assertEquals("Account not registered. Please Sign Up first.", vm.statusBanner.value)
+
+        // 1. New user clicks Sign Up (SIGN_UP mode) -> registration succeeds with $4M cash + $3M starter portfolio
+        vm.completeSystemGoogleAccountSelection(
+            email = emailA,
+            displayName = "SameDisplayName",
+            mode = com.example.data.auth.GoogleAuthMode.SIGN_UP
+        )
         val startWaitA = System.currentTimeMillis()
         while ((!vm.isAuthenticatedSession.value || vm.currentUser.value?.userId != uidA) && System.currentTimeMillis() - startWaitA < 5000) {
             pumpLooper(40)
         }
-        assertTrue("New Google account must authenticate", vm.isAuthenticatedSession.value)
+        assertTrue("New Google account must authenticate on Sign Up", vm.isAuthenticatedSession.value)
+        assertEquals(uidA, vm.verifiedRegisteredUid.value)
         val userA = vm.currentUser.value!!
         assertEquals(uidA, userA.userId)
         assertEquals(4_000_000.0, userA.cashBalance, 0.01)
@@ -922,33 +945,58 @@ class ExampleRobolectricTest {
         // Modify User A's cash balance to simulate active trading/earnings ($5,250,000)
         appDb.userDao().updateUser(userA.copy(cashBalance = 5_250_000.0))
 
-        // 9. Same Google account -> no duplicate profile & existing balance preserved
-        vm.completeSystemGoogleAccountSelection(emailA, "SameDisplayName")
-        repeat(6) { pumpLooper(40) }
-        val existingUserAfterRepeat = appDb.userDao().getUserById(uidA)
-        assertNotNull("Must not lose or duplicate profile for the same Google account", existingUserAfterRepeat)
-        assertEquals("Returning login must preserve existing cash balance", 5_250_000.0, existingUserAfterRepeat!!.cashBalance, 0.01)
-
-        // 3. Logout -> login again -> same account and same data
+        // 9. Existing registered user clicks Sign Up -> no duplicate account, shows "Account already exists. Please Sign In."
         vm.signOut(app)
-        assertFalse("Sign out must return to Login screen", vm.isAuthenticatedSession.value)
-        assertNull("Sign out must clear in-memory currentUser", vm.currentUser.value)
-        assertTrue("Sign out must clear in-memory holdings", vm.holdings.value.isEmpty())
+        pumpLooper()
+        vm.completeSystemGoogleAccountSelection(
+            email = emailA,
+            displayName = "SameDisplayName",
+            mode = com.example.data.auth.GoogleAuthMode.SIGN_UP
+        )
+        repeat(6) { pumpLooper(40) }
+        assertFalse("Existing user clicking Sign Up while logged out must be prompted to Sign In", vm.isAuthenticatedSession.value)
+        assertEquals("Account already exists. Please Sign In.", vm.statusBanner.value)
+        val existingUserAfterRepeat = appDb.userDao().getUserById(uidA)
+        assertNotNull("Must not lose profile for the same Google account", existingUserAfterRepeat)
+        assertEquals("Sign Up on existing account must preserve existing $5.25M cash balance without resetting", 5_250_000.0, existingUserAfterRepeat!!.cashBalance, 0.01)
 
-        // 2. Existing Google account -> successful login with preserved data
-        vm.completeSystemGoogleAccountSelection(emailA, "SameDisplayName")
+        // 2 & 3. Registered user clicks Sign In (SIGN_IN mode) -> login succeeds with same account and data
+        vm.completeSystemGoogleAccountSelection(
+            email = emailA,
+            displayName = "SameDisplayName",
+            mode = com.example.data.auth.GoogleAuthMode.SIGN_IN
+        )
         val startWaitRelogin = System.currentTimeMillis()
         while ((!vm.isAuthenticatedSession.value || vm.currentUser.value?.userId != uidA) && System.currentTimeMillis() - startWaitRelogin < 5000) {
             pumpLooper(40)
         }
         assertTrue(vm.isAuthenticatedSession.value)
+        assertEquals(uidA, vm.verifiedRegisteredUid.value)
         assertEquals(5_250_000.0, appDb.userDao().getUserById(uidA)!!.cashBalance, 0.01)
 
         // 4 & 8. Switch Google account & Two different Google accounts with identical display name -> isolated UID, cash, and portfolio
         val emailB = "bob.venture@gmail.com"
         val uidB = com.example.data.auth.AuthRepository.deterministicGoogleUid(emailB)
         assertFalse("Different Google accounts must have distinct UIDs even with same displayName", uidA == uidB)
-        vm.completeSystemGoogleAccountSelection(emailB, "SameDisplayName")
+
+        // Unregistered User B clicking Sign In must be denied first
+        vm.signOut(app)
+        pumpLooper()
+        vm.completeSystemGoogleAccountSelection(
+            email = emailB,
+            displayName = "SameDisplayName",
+            mode = com.example.data.auth.GoogleAuthMode.SIGN_IN
+        )
+        repeat(6) { pumpLooper(40) }
+        assertFalse("Unregistered User B clicking Sign In must be denied", vm.isAuthenticatedSession.value)
+        assertNull("Unregistered User B must not have profile created on Sign In", appDb.userDao().getUserById(uidB))
+
+        // User B clicks Sign Up -> succeeds with isolated portfolio
+        vm.completeSystemGoogleAccountSelection(
+            email = emailB,
+            displayName = "SameDisplayName",
+            mode = com.example.data.auth.GoogleAuthMode.SIGN_UP
+        )
         val startWaitB = System.currentTimeMillis()
         while ((!vm.isAuthenticatedSession.value || vm.currentUser.value?.userId != uidB) && System.currentTimeMillis() - startWaitB < 5000) {
             pumpLooper(40)
@@ -961,7 +1009,11 @@ class ExampleRobolectricTest {
         vm.signOut(app)
         vm.backendService.setSimulatedNetworkState(ConnectionStatus.OFFLINE)
         assertEquals(ConnectionStatus.OFFLINE, vm.connectionStatus.value)
-        vm.completeSystemGoogleAccountSelection(emailA, "SameDisplayName")
+        vm.completeSystemGoogleAccountSelection(
+            email = emailA,
+            displayName = "SameDisplayName",
+            mode = com.example.data.auth.GoogleAuthMode.SIGN_IN
+        )
         repeat(4) { pumpLooper(40) }
         assertFalse("Offline sign-in attempt must be blocked safely", vm.isAuthenticatedSession.value)
         vm.retryBackendConnection()
@@ -971,7 +1023,7 @@ class ExampleRobolectricTest {
         }
         assertEquals(ConnectionStatus.ONLINE, vm.connectionStatus.value)
 
-        // 7. Invalid or revoked authentication -> secure logout on startup validation
+        // 7. Invalid or revoked authentication (tampered client-side boolean) -> secure logout on startup validation
         val prefs = app.getSharedPreferences("lifeassets_session", android.content.Context.MODE_PRIVATE)
         prefs.edit().putString("active_user_id", "revoked_nonexistent_uid_999").putBoolean("is_authenticated_session", true).commit()
         val vmAfterRevoke = com.example.ui.viewmodel.LifeAssetsViewModel(app)
@@ -980,8 +1032,9 @@ class ExampleRobolectricTest {
             pumpLooper(40)
         }
         assertFalse("Invalid/revoked session UID must automatically force logout to Login screen", vmAfterRevoke.isAuthenticatedSession.value)
+        assertNull("Tampered session boolean must never grant verifiedRegisteredUid", vmAfterRevoke.verifiedRegisteredUid.value)
 
-        // 10. Existing users -> legacy account migrated intact to canonical Google UID without resetting balance
+        // 10. Existing legitimate users -> legacy account migrated intact to canonical Google UID on Sign In without resetting balance
         val legacyEmail = "legacy.founder@gmail.com"
         val legacyUid = "user_legacy_12345"
         val canonicalLegacyUid = com.example.data.auth.AuthRepository.deterministicGoogleUid(legacyEmail)
@@ -1003,7 +1056,11 @@ class ExampleRobolectricTest {
                 averageCostBasis = 80_000.0
             )
         )
-        vm.completeSystemGoogleAccountSelection(legacyEmail, "Legacy Founder")
+        vm.completeSystemGoogleAccountSelection(
+            email = legacyEmail,
+            displayName = "Legacy Founder",
+            mode = com.example.data.auth.GoogleAuthMode.SIGN_IN
+        )
         val startWaitMigration = System.currentTimeMillis()
         while ((!vm.isAuthenticatedSession.value || vm.currentUser.value?.userId != canonicalLegacyUid) && System.currentTimeMillis() - startWaitMigration < 5000) {
             pumpLooper(40)
