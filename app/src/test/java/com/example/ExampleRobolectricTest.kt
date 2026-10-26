@@ -883,7 +883,139 @@ class ExampleRobolectricTest {
         vm.signInWithGoogle(app)
         assertFalse("Failed Google Sign-In must never log into a fake account", vm.isAuthenticatedSession.value)
     }
+
+    @Test
+    fun googleAuth_all10Scenarios_registrationLoginLogoutSwitchCancelOfflineIsolationAndMigration() = runBlocking {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = com.example.ui.viewmodel.LifeAssetsViewModel(app)
+        val appDb = LifeAssetsDatabase.getInstance(app)
+        val mainShadowLooper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+
+        suspend fun pumpLooper(ms: Long = 30L) {
+            kotlinx.coroutines.delay(ms)
+            mainShadowLooper.idleFor(java.time.Duration.ofMillis(ms))
+        }
+
+        // Ensure clean unauthenticated state
+        vm.signOut(app)
+        pumpLooper()
+        assertFalse("Unauthenticated user must see Login screen", vm.isAuthenticatedSession.value)
+
+        // 5. Cancel Google Sign-In -> remain on login screen
+        vm.onGoogleSignInCancelled()
+        pumpLooper()
+        assertFalse("Cancelling Google Sign-In must remain on Login screen", vm.isAuthenticatedSession.value)
+
+        // 1. New Google account -> successful first-time registration with $4M cash + $3M starter portfolio
+        val emailA = "alice.investor@gmail.com"
+        val uidA = com.example.data.auth.AuthRepository.deterministicGoogleUid(emailA)
+        vm.completeSystemGoogleAccountSelection(emailA, "SameDisplayName")
+        val startWaitA = System.currentTimeMillis()
+        while ((!vm.isAuthenticatedSession.value || vm.currentUser.value?.userId != uidA) && System.currentTimeMillis() - startWaitA < 5000) {
+            pumpLooper(40)
+        }
+        assertTrue("New Google account must authenticate", vm.isAuthenticatedSession.value)
+        val userA = vm.currentUser.value!!
+        assertEquals(uidA, userA.userId)
+        assertEquals(4_000_000.0, userA.cashBalance, 0.01)
+
+        // Modify User A's cash balance to simulate active trading/earnings ($5,250,000)
+        appDb.userDao().updateUser(userA.copy(cashBalance = 5_250_000.0))
+
+        // 9. Same Google account -> no duplicate profile & existing balance preserved
+        vm.completeSystemGoogleAccountSelection(emailA, "SameDisplayName")
+        repeat(6) { pumpLooper(40) }
+        val existingUserAfterRepeat = appDb.userDao().getUserById(uidA)
+        assertNotNull("Must not lose or duplicate profile for the same Google account", existingUserAfterRepeat)
+        assertEquals("Returning login must preserve existing cash balance", 5_250_000.0, existingUserAfterRepeat!!.cashBalance, 0.01)
+
+        // 3. Logout -> login again -> same account and same data
+        vm.signOut(app)
+        assertFalse("Sign out must return to Login screen", vm.isAuthenticatedSession.value)
+        assertNull("Sign out must clear in-memory currentUser", vm.currentUser.value)
+        assertTrue("Sign out must clear in-memory holdings", vm.holdings.value.isEmpty())
+
+        // 2. Existing Google account -> successful login with preserved data
+        vm.completeSystemGoogleAccountSelection(emailA, "SameDisplayName")
+        val startWaitRelogin = System.currentTimeMillis()
+        while ((!vm.isAuthenticatedSession.value || vm.currentUser.value?.userId != uidA) && System.currentTimeMillis() - startWaitRelogin < 5000) {
+            pumpLooper(40)
+        }
+        assertTrue(vm.isAuthenticatedSession.value)
+        assertEquals(5_250_000.0, appDb.userDao().getUserById(uidA)!!.cashBalance, 0.01)
+
+        // 4 & 8. Switch Google account & Two different Google accounts with identical display name -> isolated UID, cash, and portfolio
+        val emailB = "bob.venture@gmail.com"
+        val uidB = com.example.data.auth.AuthRepository.deterministicGoogleUid(emailB)
+        assertFalse("Different Google accounts must have distinct UIDs even with same displayName", uidA == uidB)
+        vm.completeSystemGoogleAccountSelection(emailB, "SameDisplayName")
+        val startWaitB = System.currentTimeMillis()
+        while ((!vm.isAuthenticatedSession.value || vm.currentUser.value?.userId != uidB) && System.currentTimeMillis() - startWaitB < 5000) {
+            pumpLooper(40)
+        }
+        assertEquals(uidB, vm.currentUser.value?.userId)
+        assertEquals("Second Google account gets its own $4M starting cash", 4_000_000.0, appDb.userDao().getUserById(uidB)!!.cashBalance, 0.01)
+        assertEquals("First Google account keeps its $5.25M cash isolated", 5_250_000.0, appDb.userDao().getUserById(uidA)!!.cashBalance, 0.01)
+
+        // 6. Internet failure -> safe error and retry
+        vm.signOut(app)
+        vm.backendService.setSimulatedNetworkState(ConnectionStatus.OFFLINE)
+        assertEquals(ConnectionStatus.OFFLINE, vm.connectionStatus.value)
+        vm.completeSystemGoogleAccountSelection(emailA, "SameDisplayName")
+        repeat(4) { pumpLooper(40) }
+        assertFalse("Offline sign-in attempt must be blocked safely", vm.isAuthenticatedSession.value)
+        vm.retryBackendConnection()
+        val startWaitReconnect = System.currentTimeMillis()
+        while (vm.connectionStatus.value != ConnectionStatus.ONLINE && System.currentTimeMillis() - startWaitReconnect < 4000) {
+            pumpLooper(50)
+        }
+        assertEquals(ConnectionStatus.ONLINE, vm.connectionStatus.value)
+
+        // 7. Invalid or revoked authentication -> secure logout on startup validation
+        val prefs = app.getSharedPreferences("lifeassets_session", android.content.Context.MODE_PRIVATE)
+        prefs.edit().putString("active_user_id", "revoked_nonexistent_uid_999").putBoolean("is_authenticated_session", true).commit()
+        val vmAfterRevoke = com.example.ui.viewmodel.LifeAssetsViewModel(app)
+        val startWaitRevoke = System.currentTimeMillis()
+        while (vmAfterRevoke.isAuthenticatedSession.value && System.currentTimeMillis() - startWaitRevoke < 4000) {
+            pumpLooper(40)
+        }
+        assertFalse("Invalid/revoked session UID must automatically force logout to Login screen", vmAfterRevoke.isAuthenticatedSession.value)
+
+        // 10. Existing users -> legacy account migrated intact to canonical Google UID without resetting balance
+        val legacyEmail = "legacy.founder@gmail.com"
+        val legacyUid = "user_legacy_12345"
+        val canonicalLegacyUid = com.example.data.auth.AuthRepository.deterministicGoogleUid(legacyEmail)
+        appDb.userDao().upsertUser(
+            UserEntity(
+                userId = legacyUid,
+                username = "Legacy_Founder",
+                normalizedUsername = "legacy_founder",
+                email = legacyEmail,
+                passwordHash = "legacy_hash",
+                cashBalance = 19_800_000.0
+            )
+        )
+        appDb.holdingDao().upsertHolding(
+            com.example.data.local.HoldingEntity(
+                userId = legacyUid,
+                assetId = "crypto_01",
+                quantity = 12.5,
+                averageCostBasis = 80_000.0
+            )
+        )
+        vm.completeSystemGoogleAccountSelection(legacyEmail, "Legacy Founder")
+        val startWaitMigration = System.currentTimeMillis()
+        while ((!vm.isAuthenticatedSession.value || vm.currentUser.value?.userId != canonicalLegacyUid) && System.currentTimeMillis() - startWaitMigration < 5000) {
+            pumpLooper(40)
+        }
+        val migratedUser = appDb.userDao().getUserById(canonicalLegacyUid)
+        assertNotNull("Legacy user must be migrated to canonical Google UID", migratedUser)
+        assertEquals("Migrated user must preserve exact $19.8M cash balance", 19_800_000.0, migratedUser!!.cashBalance, 0.01)
+        val migratedHoldings = appDb.holdingDao().getHoldingsForUser(canonicalLegacyUid)
+        assertTrue("Migrated user must preserve existing BTC holding", migratedHoldings.any { it.assetId == "crypto_01" && it.quantity == 12.5 })
+    }
 }
+
 
 
 

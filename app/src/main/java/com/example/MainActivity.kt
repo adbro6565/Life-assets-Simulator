@@ -145,10 +145,10 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
                 currentDestination = AppDestination.DASHBOARD
                 viewModel.completeSystemGoogleAccountSelection(selectedEmail)
             } else {
-                viewModel.setShowGoogleEmailFallbackDialog(true)
+                viewModel.onGoogleSignInCancelled()
             }
         } else {
-            viewModel.setShowGoogleEmailFallbackDialog(true)
+            viewModel.onGoogleSignInCancelled()
         }
     }
 
@@ -178,7 +178,7 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
         var googleEmailInput by rememberSaveable { mutableStateOf("") }
         var googleNameInput by rememberSaveable { mutableStateOf("") }
         AlertDialog(
-            onDismissRequest = { viewModel.setShowGoogleEmailFallbackDialog(false) },
+            onDismissRequest = { viewModel.onGoogleSignInCancelled() },
             containerColor = DarkCardBg,
             title = {
                 Text(
@@ -242,7 +242,7 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
                 }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.setShowGoogleEmailFallbackDialog(false) }) {
+                TextButton(onClick = { viewModel.onGoogleSignInCancelled() }) {
                     Text("Cancel", color = TextSecondary)
                 }
             }
@@ -304,6 +304,38 @@ fun LifeAssetsRootApp(viewModel: LifeAssetsViewModel) {
                         viewModel.sendPasswordReset(recoveryEmail)
                     }
                 )
+            }
+        }
+        return
+    }
+
+    // Show the dashboard only after authentication and profile loading are complete
+    if (user == null) {
+        Scaffold(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(DarkNavyBg),
+            containerColor = DarkNavyBg,
+            contentWindowInsets = WindowInsets.safeDrawing
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "Loading Secure Account Profile...",
+                        color = TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    TextButton(onClick = { viewModel.signOut(context) }) {
+                        Text("Return to Sign In", color = EmeraldAccent)
+                    }
+                }
             }
         }
         return

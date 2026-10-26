@@ -51,6 +51,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.util.Locale
@@ -269,6 +271,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
     val imageAuditReport: StateFlow<ImageAuditAdminReport?> = _imageAuditReport.asStateFlow()
 
     private var userStreamsJob: Job? = null
+    private val authProvisionMutex = Mutex()
 
     init {
         startMarketSimulationLoop()
@@ -278,10 +281,25 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         val activeUid = _currentUserId.value
         val isAuth = _isAuthenticatedSession.value
         if (isAuth && activeUid.isNotBlank()) {
-            observeUserStreams(activeUid)
             viewModelScope.launch {
-                runCatching { refreshDailyRewardStatus() }
+                val existingUser = db.userDao().getUserById(activeUid)
+                if (existingUser != null) {
+                    _currentUser.value = existingUser
+                    observeUserStreams(activeUid)
+                    runCatching { refreshDailyRewardStatus() }
+                } else if (authRepository.currentUser == null) {
+                    // Invalid or revoked session with no profile: safely reset to Login screen
+                    _isAuthenticatedSession.value = false
+                    _currentUserId.value = ""
+                    prefs.edit()
+                        .putBoolean("is_authenticated_session", false)
+                        .remove("active_user_id")
+                        .apply()
+                }
             }
+        } else if (isAuth && activeUid.isBlank() && authRepository.currentUser == null) {
+            _isAuthenticatedSession.value = false
+            prefs.edit().putBoolean("is_authenticated_session", false).apply()
         }
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -357,17 +375,36 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    private suspend fun provisionOrLoadGoogleIdentity(
+    suspend fun provisionOrLoadGoogleIdentity(
         uid: String,
         email: String?,
         displayName: String?
-    ): UserEntity {
+    ): UserEntity = authProvisionMutex.withLock {
+        val canonicalUid = uid.trim()
+        require(canonicalUid.isNotBlank()) { "Authenticated UID cannot be blank" }
         val cleanEmail = email?.trim()?.takeIf { it.isNotBlank() }
-        var existing = db.userDao().getUserById(uid)
-            ?: cleanEmail?.let { db.userDao().getUserByEmail(it) }
-        val resolvedUid = existing?.userId ?: uid
+
+        var existing = db.userDao().getUserById(canonicalUid)
+
+        // Safe migration if a legacy local account had the same verified email under an old generated ID
+        if (existing == null && cleanEmail != null) {
+            val legacyByEmail = db.userDao().getUserByEmail(cleanEmail)
+            if (legacyByEmail != null && legacyByEmail.userId != canonicalUid) {
+                val migratedUser = legacyByEmail.copy(userId = canonicalUid)
+                db.userDao().upsertUser(migratedUser)
+                val legacyHoldings = db.holdingDao().getHoldingsForUser(legacyByEmail.userId)
+                for (h in legacyHoldings) {
+                    db.holdingDao().upsertHolding(h.copy(userId = canonicalUid))
+                    db.holdingDao().deleteHolding(legacyByEmail.userId, h.assetId)
+                }
+                existing = migratedUser
+            } else if (legacyByEmail != null) {
+                existing = legacyByEmail
+            }
+        }
+
         if (existing == null) {
-            val remoteProfile = firestoreRepository?.getUserProfile(resolvedUid)?.getOrNull()
+            val remoteProfile = firestoreRepository?.getUserProfile(canonicalUid)?.getOrNull()
             if (remoteProfile != null) {
                 backendQuotaMonitor.recordReads(1)
             }
@@ -381,11 +418,11 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
             val uniqueName = ensureUniqueUsernameCandidate(baseName)
             val initialCash = remoteProfile?.cashBalance ?: STARTING_CASH_USD
             val entity = UserEntity(
-                userId = resolvedUid,
+                userId = canonicalUid,
                 username = uniqueName,
                 normalizedUsername = uniqueName.lowercase(),
                 email = cleanEmail ?: "$uniqueName@lifeassets.io",
-                passwordHash = hashPassword(resolvedUid),
+                passwordHash = hashPassword(canonicalUid),
                 cashBalance = initialCash,
                 realizedPnL = 0.0,
                 streakDays = remoteProfile?.streakDays?.toInt() ?: 1,
@@ -396,7 +433,7 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                 for ((assetId, qty, avgCost) in STARTER_PORTFOLIO_3M_HOLDINGS) {
                     db.holdingDao().upsertHolding(
                         HoldingEntity(
-                            userId = resolvedUid,
+                            userId = canonicalUid,
                             assetId = assetId,
                             quantity = qty,
                             averageCostBasis = avgCost,
@@ -404,21 +441,43 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                         )
                     )
                 }
+            } else {
+                // Restore returning user's cloud holdings into Room without overwriting with starter assets
+                val cloudHoldings = firestoreRepository?.getHoldings(canonicalUid)?.getOrNull().orEmpty()
+                for (ch in cloudHoldings) {
+                    if (ch.assetId.isNotBlank() && ch.quantity > 0.0) {
+                        db.holdingDao().upsertHolding(
+                            HoldingEntity(
+                                userId = canonicalUid,
+                                assetId = ch.assetId,
+                                quantity = ch.quantity,
+                                averageCostBasis = ch.averageCostBasis,
+                                reservedQuantity = 0.0
+                            )
+                        )
+                    }
+                }
             }
-            multiplayerService.seedInitialOffersIfNeeded(resolvedUid, uniqueName)
+            multiplayerService.seedInitialOffersIfNeeded(canonicalUid, uniqueName)
             existing = entity
         }
-        _currentUser.value = existing
+
         switchActiveUser(existing.userId)
+        _currentUser.value = existing
         syncHoldingsWithFirestore()
-        return existing
+        existing
     }
 
     private fun observeFirebaseAuthChanges() {
         viewModelScope.launch {
             authRepository.observeFirebaseUser().collect { fbUser ->
                 if (fbUser != null) {
-                    provisionOrLoadGoogleIdentity(fbUser.uid, fbUser.email, fbUser.displayName)
+                    val userEntity = provisionOrLoadGoogleIdentity(
+                        uid = fbUser.uid,
+                        email = fbUser.email,
+                        displayName = fbUser.displayName
+                    )
+                    _currentUser.value = userEntity
                 }
             }
         }
@@ -434,13 +493,29 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         return candidate
     }
 
+    private fun clearInMemoryUserData() {
+        userStreamsJob?.cancel()
+        _currentUser.value = null
+        _holdings.value = emptyList()
+        _transactions.value = emptyList()
+        _limitOrders.value = emptyList()
+        _tradeOffers.value = emptyList()
+        _dailyRewardClaims.value = emptyList()
+    }
+
     private fun switchActiveUser(userId: String) {
+        if (_currentUserId.value != userId) {
+            clearInMemoryUserData()
+        }
         _currentUserId.value = userId
         prefs.edit().putString("active_user_id", userId).apply()
-        observeUserStreams(userId)
         viewModelScope.launch {
+            _currentUser.value = db.userDao().getUserById(userId)
+            _holdings.value = db.holdingDao().getHoldingsForUser(userId)
+            _transactions.value = db.transactionDao().getTransactionsForUser(userId)
             refreshDailyRewardStatus()
         }
+        observeUserStreams(userId)
     }
 
     private fun startMarketSimulationLoop() {
@@ -852,14 +927,29 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         _showGoogleEmailFallbackDialog.value = show
     }
 
-    fun completeSystemGoogleAccountSelection(email: String, displayName: String? = null) {
+    fun onGoogleSignInCancelled() {
+        _requestSystemGoogleAccountPicker.value = false
+        _showGoogleEmailFallbackDialog.value = false
+        postBanner("Google Sign-In was cancelled.")
+    }
+
+    fun completeSystemGoogleAccountSelection(
+        email: String,
+        displayName: String? = null,
+        explicitUid: String? = null
+    ) {
+        if (backendService.connectionStatus.value == com.example.data.model.ConnectionStatus.OFFLINE) {
+            postBanner("No Internet Connection. Online backend is required to sign in.")
+            return
+        }
         val cleanEmail = email.trim()
         if (cleanEmail.isBlank() || !cleanEmail.contains("@")) {
             postBanner("Please select or enter a valid Google email address.")
             return
         }
         viewModelScope.launch {
-            val uid = com.example.data.auth.AuthRepository.deterministicGoogleUid(cleanEmail)
+            val uid = explicitUid?.trim()?.takeIf { it.isNotBlank() }
+                ?: com.example.data.auth.AuthRepository.deterministicGoogleUid(cleanEmail)
             val effectiveName = displayName?.trim()?.takeIf { it.isNotBlank() }
                 ?: cleanEmail.substringBefore("@")
             authRepository.markGoogleAccountAuthenticated(uid, cleanEmail, effectiveName)
@@ -929,55 +1019,24 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         }
 
         viewModelScope.launch {
-            val sanitized = rawName.replace(Regex("[^a-zA-Z0-9_]"), "_").take(20)
-            val cleanUser = ensureUniqueUsernameCandidate(sanitized)
-            val normalized = cleanUser.lowercase()
-
-            // Register securely with Firebase Authentication
-            val fbResult = authRepository.signUpWithEmail(rawEmail, password, cleanUser)
-            fbResult.onSuccess { fbUser ->
-                val uid = fbUser.uid
-                val newUser = UserEntity(
-                    userId = uid,
-                    username = cleanUser,
-                    normalizedUsername = normalized,
-                    email = rawEmail,
-                    passwordHash = hashPassword(password),
-                    cashBalance = STARTING_CASH_USD,
-                    realizedPnL = 0.0,
-                    streakDays = 1,
-                    lastClaimDateKathmandu = null
-                )
-                db.userDao().upsertUser(newUser)
-
-                // Seed $3,000,000.00 starter asset allocation separately from $4,000,000.00 cash balance
-                for ((assetId, qty, avgCost) in STARTER_PORTFOLIO_3M_HOLDINGS) {
-                    db.holdingDao().upsertHolding(
-                        HoldingEntity(
-                            userId = uid,
-                            assetId = assetId,
-                            quantity = qty,
-                            averageCostBasis = avgCost,
-                            reservedQuantity = 0.0
-                        )
-                    )
+            authProvisionMutex.withLock {
+                // Prevent duplicate registration for an already-registered email
+                val existingByEmail = db.userDao().getUserByEmail(rawEmail)
+                if (existingByEmail != null) {
+                    postBanner("An account with this email already exists. Please log in.")
+                    return@withLock
                 }
 
-                multiplayerService.seedInitialOffersIfNeeded(uid, cleanUser)
-                switchActiveUser(uid)
-                markAuthenticated(true)
-                _showAuthModal.value = false
-                syncHoldingsWithFirestore()
-                postBanner("Welcome to Life Assets, @$cleanUser! ($4,000,000 Virtual Cash Ready)")
-            }.onFailure { err ->
-                val msg = err.localizedMessage ?: err.message ?: "Registration failed."
-                if (msg.contains("already in use", ignoreCase = true) || msg.contains("collision", ignoreCase = true)) {
-                    postBanner("An account with this email already exists. Please log in.")
-                } else {
-                    // Safe fallback for offline testing or environments without active Firebase Auth emulator
-                    val newId = "user_${UUID.randomUUID().toString().take(12)}"
+                val sanitized = rawName.replace(Regex("[^a-zA-Z0-9_]"), "_").take(20)
+                val cleanUser = ensureUniqueUsernameCandidate(sanitized)
+                val normalized = cleanUser.lowercase()
+
+                // Register securely with Firebase Authentication
+                val fbResult = authRepository.signUpWithEmail(rawEmail, password, cleanUser)
+                fbResult.onSuccess { fbUser ->
+                    val uid = fbUser.uid
                     val newUser = UserEntity(
-                        userId = newId,
+                        userId = uid,
                         username = cleanUser,
                         normalizedUsername = normalized,
                         email = rawEmail,
@@ -988,10 +1047,12 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                         lastClaimDateKathmandu = null
                     )
                     db.userDao().upsertUser(newUser)
+
+                    // Seed $3,000,000.00 starter asset allocation separately from $4,000,000.00 cash balance
                     for ((assetId, qty, avgCost) in STARTER_PORTFOLIO_3M_HOLDINGS) {
                         db.holdingDao().upsertHolding(
                             HoldingEntity(
-                                userId = newId,
+                                userId = uid,
                                 assetId = assetId,
                                 quantity = qty,
                                 averageCostBasis = avgCost,
@@ -999,11 +1060,49 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                             )
                         )
                     }
-                    multiplayerService.seedInitialOffersIfNeeded(newId, cleanUser)
-                    switchActiveUser(newId)
+
+                    multiplayerService.seedInitialOffersIfNeeded(uid, cleanUser)
+                    switchActiveUser(uid)
                     markAuthenticated(true)
                     _showAuthModal.value = false
+                    syncHoldingsWithFirestore()
                     postBanner("Welcome to Life Assets, @$cleanUser! ($4,000,000 Virtual Cash Ready)")
+                }.onFailure { err ->
+                    val msg = err.localizedMessage ?: err.message ?: "Registration failed."
+                    if (msg.contains("already in use", ignoreCase = true) || msg.contains("collision", ignoreCase = true)) {
+                        postBanner("An account with this email already exists. Please log in.")
+                    } else {
+                        // Deterministic UID fallback for environments without active Firebase Auth emulator
+                        val newId = com.example.data.auth.AuthRepository.deterministicGoogleUid(rawEmail)
+                        val newUser = UserEntity(
+                            userId = newId,
+                            username = cleanUser,
+                            normalizedUsername = normalized,
+                            email = rawEmail,
+                            passwordHash = hashPassword(password),
+                            cashBalance = STARTING_CASH_USD,
+                            realizedPnL = 0.0,
+                            streakDays = 1,
+                            lastClaimDateKathmandu = null
+                        )
+                        db.userDao().upsertUser(newUser)
+                        for ((assetId, qty, avgCost) in STARTER_PORTFOLIO_3M_HOLDINGS) {
+                            db.holdingDao().upsertHolding(
+                                HoldingEntity(
+                                    userId = newId,
+                                    assetId = assetId,
+                                    quantity = qty,
+                                    averageCostBasis = avgCost,
+                                    reservedQuantity = 0.0
+                                )
+                            )
+                        }
+                        multiplayerService.seedInitialOffersIfNeeded(newId, cleanUser)
+                        switchActiveUser(newId)
+                        markAuthenticated(true)
+                        _showAuthModal.value = false
+                        postBanner("Welcome to Life Assets, @$cleanUser! ($4,000,000 Virtual Cash Ready)")
+                    }
                 }
             }
         }
@@ -1143,22 +1242,17 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun signOut(context: Context) {
+        _isAuthenticatedSession.value = false
+        prefs.edit()
+            .putBoolean("is_authenticated_session", false)
+            .remove("active_user_id")
+            .apply()
+        clearInMemoryUserData()
+        _showAuthModal.value = false
+        _requestSystemGoogleAccountPicker.value = false
+        _showGoogleEmailFallbackDialog.value = false
         viewModelScope.launch {
             authRepository.signOut(context)
-            _isAuthenticatedSession.value = false
-            prefs.edit()
-                .putBoolean("is_authenticated_session", false)
-                .remove("active_user_id")
-                .apply()
-            userStreamsJob?.cancel()
-            _currentUserId.value = ""
-            _currentUser.value = null
-            _holdings.value = emptyList()
-            _transactions.value = emptyList()
-            _limitOrders.value = emptyList()
-            _tradeOffers.value = emptyList()
-            _dailyRewardClaims.value = emptyList()
-            _showAuthModal.value = false
             postBanner("You have logged out of Life Assets Simulator.")
         }
     }
@@ -1201,21 +1295,26 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
         }
         viewModelScope.launch {
             try {
-                val user = _currentUser.value
-                val metrics = portfolioMetrics.value
-                if (user != null) {
-                    repo.syncUserProfile(
-                        username = user.username,
-                        displayName = fbUser.displayName,
-                        cashBalance = metrics.cashBalance,
-                        netWorth = metrics.totalNetWorth,
-                        streakDays = user.streakDays,
-                        lastClaimDateKathmandu = user.lastClaimDateKathmandu
-                    )
-                    backendQuotaMonitor.recordWrites(1)
-                }
+                val targetUid = fbUser.uid
+                val user = db.userDao().getUserById(targetUid) ?: return@launch
+                val localHoldings = db.holdingDao().getHoldingsForUser(targetUid)
                 val ticks = marketEngine.ticks.value
-                val localHoldings = _holdings.value
+                var investedVal = 0.0
+                for (h in localHoldings) {
+                    val price = ticks[h.assetId]?.currentPrice
+                        ?: AssetCatalogue.getAssetById(h.assetId)?.basePrice
+                        ?: h.averageCostBasis
+                    investedVal += h.quantity * price
+                }
+                repo.syncUserProfile(
+                    username = user.username,
+                    displayName = fbUser.displayName,
+                    cashBalance = user.cashBalance,
+                    netWorth = user.cashBalance + investedVal,
+                    streakDays = user.streakDays,
+                    lastClaimDateKathmandu = user.lastClaimDateKathmandu
+                )
+                backendQuotaMonitor.recordWrites(1)
                 val localAssetIds = localHoldings.map { it.assetId }.toSet()
                 for (h in localHoldings) {
                     val asset = AssetCatalogue.getAssetById(h.assetId) ?: continue
