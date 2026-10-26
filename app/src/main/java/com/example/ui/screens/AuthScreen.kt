@@ -123,7 +123,8 @@ fun OnboardingAuthFlowScreen(
             0 -> {
                 SplashLandingContent(
                     onSignUpClick = { authStage = 2 },
-                    onLogInClick = { authStage = 1 }
+                    onLogInClick = { authStage = 1 },
+                    onSignInWithGoogle = onSignInWithGoogle
                 )
             }
 
@@ -147,7 +148,8 @@ fun OnboardingAuthFlowScreen(
 @Composable
 private fun SplashLandingContent(
     onSignUpClick: () -> Unit,
-    onLogInClick: () -> Unit
+    onLogInClick: () -> Unit,
+    onSignInWithGoogle: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -340,6 +342,47 @@ private fun SplashLandingContent(
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold
                 )
+            }
+
+            OutlinedButton(
+                onClick = onSignInWithGoogle,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .testTag("splash_google_button"),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, SubtleCardBorder),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = DarkCardBg,
+                    contentColor = TextPrimary
+                )
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(Color.White),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "G",
+                            color = Color(0xFF4285F4),
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 15.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Continue with Google",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                }
             }
 
             Text(
@@ -730,7 +773,7 @@ private fun LoginSignupContent(
                 }
                 Spacer(modifier = Modifier.width(10.dp))
                 Text(
-                    text = "Continue with Google",
+                    text = if (isSignUpMode) "Sign Up with Google" else "Sign In with Google",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = TextPrimary

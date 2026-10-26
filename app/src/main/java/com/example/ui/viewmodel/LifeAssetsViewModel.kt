@@ -889,12 +889,11 @@ class LifeAssetsViewModel(application: Application) : AndroidViewModel(applicati
                 _showGoogleEmailFallbackDialog.value = false
                 postBanner("Signed in with Google as @${userEntity.username} (${userEntity.email})")
             }.onFailure { err ->
-                val isCancelled = err is androidx.credentials.exceptions.GetCredentialCancellationException ||
-                    err.message?.contains("cancel", ignoreCase = true) == true
-                if (isCancelled) {
-                    postBanner("Google Sign-In was cancelled. Please select a Google account to continue.")
-                } else if (activityContext is android.app.Activity || activityContext is android.content.ContextWrapper && activityContext !is android.app.Application) {
-                    // Launch native Android OS Google Account Chooser when CredentialManager OAuth SHA-1 differs
+                val isActivityHost = activityContext is android.app.Activity ||
+                    (activityContext is android.content.ContextWrapper && activityContext !is android.app.Application)
+                if (isActivityHost) {
+                    // Play Services CredentialManager throws GetCredentialCancellationException when APK SHA-1
+                    // differs from OAuth console; immediately launch Android OS native Google Account Chooser
                     _requestSystemGoogleAccountPicker.value = true
                 } else {
                     postBanner(

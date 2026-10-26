@@ -171,8 +171,6 @@ class AuthRepository(
                     .addCredentialOption(signInOption)
                     .build()
                 credentialManager.getCredential(hostContext, primaryRequest)
-            } catch (cancelEx: GetCredentialCancellationException) {
-                throw cancelEx
             } catch (primaryEx: Exception) {
                 Log.w("Auth", "GetSignInWithGoogleOption failed, falling back to GetGoogleIdOption: ${primaryEx.message}")
                 val fallbackOption = GetGoogleIdOption.Builder()
